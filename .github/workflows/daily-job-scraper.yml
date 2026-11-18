@@ -1,0 +1,50 @@
+
+name: Daily Job Scraper
+
+on:
+  schedule:
+    # 9:17 AM IST = 03:47 UTC
+    - cron: "47 3 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: daily-job-scraper
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Show JobSpy Version
+        run: python -m pip show python-jobspy
+
+      - name: Run Job Scraper
+        run: python run_jobspy.py
+
+      - name: Upload Job Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-job-results-${{ github.run_number }}
+          path: jobspy/
+          if-no-files-found: warn
+          retention-days: 7

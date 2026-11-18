@@ -1,0 +1,27 @@
+
+# Python environment
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Scraper output — generated again in the cloud
+jobspy/*.json
+jobspy/*.jsonl
+jobspy/*.csv
+jobspy/*.xlsx
+
+# Local editor files
+.vscode/
+.idea/
