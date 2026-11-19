@@ -1,8 +1,14 @@
 """
-Unified Pipeline Orchestrator and Exporter for Phase 5.
+Unified Pipeline Orchestrator and Exporter.
 
-Coordinates multi-source ingestion, cross-platform deduplication,
-candidate matching, categorization, and multi-format exports (JSON, CSV, Excel).
+Coordinates:
+1. Multi-source ingestion (Indeed, Naukri, LinkedIn, ATS)
+2. Cross-platform deduplication
+3. Complete Master Deduplicated Dataset Export (deduplicated_jobs.*) BEFORE matching
+4. Candidate matching against Authoritative Candidate Skills Profile (Version 2.0)
+5. Multi-category classification (Matched, Supporting IT, Internships, Manual Verification, Excluded)
+6. Multi-format exports (JSON, CSV, Excel)
+7. Audit and telemetry reports
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from candidate_matching_engine import evaluate_candidate_matching
+from candidate_profile import CANDIDATE_PROFILE, SCORING_WEIGHTS
 from unified_dedup import deduplicate_cross_source
 from unified_ingestion import ingest_all_sources
 from unified_models import CanonicalJobRecord, EligibilityStatus, JobCategory
@@ -38,41 +45,78 @@ class UnifiedPipeline:
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self) -> dict[str, Any]:
-        """Execute full Phase 5 unified pipeline."""
+        """Execute full unified pipeline adhering strictly to Phase 6 sequence."""
+        # Step 1: Ingesting all completed source datasets
         logger.info("Step 1: Ingesting all completed source datasets...")
         raw_canonical, ingestion_summary = ingest_all_sources(self.base_dir)
 
+        # Step 2: Cross-source deduplication
         logger.info("Step 2: Performing cross-source deduplication...")
         unique_records, dedup_audit = deduplicate_cross_source(raw_canonical)
 
-        logger.info("Step 3: Evaluating candidate matching, scoring, and eligibility...")
+        # Step 3: Export complete master deduplicated dataset BEFORE candidate matching
+        logger.info("Step 3: Exporting Master Deduplicated Dataset (deduplicated_jobs) BEFORE candidate matching...")
+        self._export_json(self.base_dir / "deduplicated_jobs.json", unique_records)
+        self._export_csv(self.base_dir / "deduplicated_jobs.csv", unique_records)
+        self._export_excel(self.base_dir / "deduplicated_jobs.xlsx", unique_records, "All Deduplicated Jobs")
+
+        # Step 4: Candidate matching against authoritative profile
+        logger.info("Step 4: Evaluating candidate matching, scoring, and eligibility against 15 role families...")
         processed_records: list[CanonicalJobRecord] = []
         for rec in unique_records:
             evaluated = evaluate_candidate_matching(rec)
             processed_records.append(evaluated)
 
-        logger.info("Step 4: Categorizing records...")
-        matched_jobs = [r for r in processed_records if r.eligibility_status == EligibilityStatus.PASS_STATUS.value and r.overall_match_score > 60.0]
-        # Sort matched jobs descending by overall match score
+        # Step 5: Categorizing records (Strictly mutually exclusive partition)
+        logger.info("Step 5: Categorizing records...")
+        matched_jobs = [
+            r for r in processed_records
+            if r.job_category == JobCategory.DIRECT_CYBERSECURITY.value
+        ]
         matched_jobs.sort(key=lambda x: x.overall_match_score, reverse=True)
 
-        supporting_it_jobs = [r for r in processed_records if r.job_category == JobCategory.SUPPORTING_IT.value]
-        internship_jobs = [r for r in processed_records if r.job_category == JobCategory.INTERNSHIP.value]
-        manual_review_jobs = [r for r in processed_records if r.eligibility_status == EligibilityStatus.REVIEW_STATUS.value]
-        excluded_jobs = [r for r in processed_records if r.eligibility_status == EligibilityStatus.EXCLUDE_STATUS.value]
+        supporting_it_jobs = [
+            r for r in processed_records
+            if r.job_category == JobCategory.SUPPORTING_IT.value
+        ]
+        internship_jobs = [
+            r for r in processed_records
+            if r.job_category == JobCategory.INTERNSHIP.value
+        ]
+        manual_review_jobs = [
+            r for r in processed_records
+            if r.job_category == JobCategory.MANUAL_VERIFICATION.value
+        ]
+        excluded_jobs = [
+            r for r in processed_records
+            if r.job_category == JobCategory.EXCLUDED.value
+        ]
 
-        logger.info("Step 5: Exporting JSON, CSV, and Excel datasets...")
+        # Step 6: Export all category outputs
+        logger.info("Step 6: Exporting JSON, CSV, and Excel datasets...")
+
+        # Master evaluated datasets (unified_jobs)
         self._export_json(self.base_dir / "unified_jobs.json", processed_records)
         self._export_csv(self.base_dir / "unified_jobs.csv", processed_records)
-        self._export_excel(self.base_dir / "unified_jobs.xlsx", processed_records, "All Unified Jobs")
+        self._export_excel(self.base_dir / "unified_jobs.xlsx", processed_records, "All Evaluated Jobs")
 
+        # Matched jobs (> 60.0% score and passed all eligibility)
         self._export_json(self.base_dir / "matched_jobs.json", matched_jobs)
         self._export_csv(self.base_dir / "matched_jobs.csv", matched_jobs)
         self._export_excel(self.base_dir / "matched_jobs.xlsx", matched_jobs, "Matched Jobs (>60% Score)")
 
-        self._export_json(self.base_dir / "supporting_it_jobs.json", supporting_it_jobs)
-        self._export_json(self.base_dir / "internships.json", internship_jobs)
+        # Manual verification jobs
         self._export_json(self.base_dir / "manual_verification_jobs.json", manual_review_jobs)
+        self._export_csv(self.base_dir / "manual_verification_jobs.csv", manual_review_jobs)
+        self._export_excel(self.base_dir / "manual_verification_jobs.xlsx", manual_review_jobs, "Manual Verification")
+
+        # Supporting IT, Internships, Excluded
+        self._export_json(self.base_dir / "supporting_it_jobs.json", supporting_it_jobs)
+        self._export_csv(self.base_dir / "supporting_it_jobs.csv", supporting_it_jobs)
+
+        self._export_json(self.base_dir / "internships.json", internship_jobs)
+        self._export_csv(self.base_dir / "internships.csv", internship_jobs)
+
         self._export_json(self.base_dir / "excluded_jobs.json", excluded_jobs)
 
         # Export duplicate audit
@@ -97,6 +141,7 @@ class UnifiedPipeline:
             "total_ingested_raw": ingestion_summary["total_raw_ingested"],
             "total_canonical_unique": len(processed_records),
             "duplicates_merged": dedup_audit.duplicates_merged_total,
+            "deduplicated_master_count": len(unique_records),
             "matched_jobs_count": len(matched_jobs),
             "supporting_it_count": len(supporting_it_jobs),
             "internships_count": len(internship_jobs),
@@ -104,7 +149,7 @@ class UnifiedPipeline:
             "excluded_count": len(excluded_jobs),
             "output_directory": str(self.base_dir.resolve()),
         }
-        logger.info(f"Phase 5 Pipeline Complete: {summary_result}")
+        logger.info(f"Unified Pipeline Complete: {summary_result}")
         return summary_result
 
     def _export_json(self, path: Path, records: list[CanonicalJobRecord]) -> None:
@@ -190,7 +235,25 @@ class UnifiedPipeline:
                 prefix = reason.split(":")[0] if ":" in reason else reason[:40]
                 rejection_counts[prefix] = rejection_counts.get(prefix, 0) + 1
 
+        # Role family distribution
+        role_family_counts: dict[str, int] = {}
+        for r in all_records:
+            fam = r.primary_role_family or "Unassigned"
+            role_family_counts[fam] = role_family_counts.get(fam, 0) + 1
+
         return {
+            "candidate_profile_metadata": {
+                "version": CANDIDATE_PROFILE.get("version"),
+                "updated_date": CANDIDATE_PROFILE.get("updated_date"),
+                "source_file": CANDIDATE_PROFILE.get("source_file"),
+                "education": CANDIDATE_PROFILE["candidate"]["degree"],
+                "institution": CANDIDATE_PROFILE["candidate"]["institution"],
+                "graduation_year": CANDIDATE_PROFILE["candidate"]["graduation_year"],
+                "professional_experience": CANDIDATE_PROFILE["experience"][0]["role"] + " at " + CANDIDATE_PROFILE["experience"][0]["company"],
+                "professional_security_years": 0.0,
+                "scoring_model": SCORING_WEIGHTS,
+                "active_threshold": "STRICTLY > 60.0% (overriding original 50% guideline)",
+            },
             "total_evaluated_records": len(all_records),
             "matched_jobs_count": len(matched),
             "supporting_it_count": len(supporting),
@@ -198,14 +261,8 @@ class UnifiedPipeline:
             "manual_review_count": len(manual),
             "excluded_jobs_count": len(excluded),
             "score_distribution": score_bins,
+            "role_family_distribution": role_family_counts,
             "top_rejection_reasons": rejection_counts,
-            "candidate_profile_applied": {
-                "degree": "B.E. Electronics and Communication Engineering",
-                "institution": "Saveetha School of Engineering",
-                "graduation_year": 2026,
-                "professional_security_years": 0.0,
-                "overall_threshold": "STRICTLY > 60.0%",
-            },
         }
 
     def _build_quality_report(
@@ -251,4 +308,3 @@ class UnifiedPipeline:
                 },
             },
         }
-

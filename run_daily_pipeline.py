@@ -324,14 +324,18 @@ class DailyPipelineOrchestrator:
 
         ps = summary.get("pipeline_summary", {})
         lines.append("\n## 2. Processing & Candidate Matching Summary")
+        lines.append(f"- **Candidate Profile**: Authoritative Version 2.0 (9 November 2026) — 15 Role Families")
+        lines.append(f"- **Scoring Model**: 35% Tech Skills | 25% Responsibilities | 15% Experience | 10% Tools | 5% Education & Certs | 10% Transferable")
+        lines.append(f"- **Matching Threshold**: Strictly > 60.0%")
         lines.append(f"- **Total Ingested Raw**: {ps.get('total_ingested_raw', 0)}")
+        lines.append(f"- **Master Deduplicated Jobs (Pre-Match)**: **{ps.get('deduplicated_master_count', 0)}** (`deduplicated_jobs.json/csv/xlsx`)")
         lines.append(f"- **Total Unique Canonical Jobs**: {ps.get('total_canonical_unique', 0)}")
         lines.append(f"- **Duplicates Merged**: {ps.get('duplicates_merged', 0)}")
-        lines.append(f"- **🎯 Matched Opportunities (> 60% Score & PASS)**: **{ps.get('matched_jobs_count', 0)}**")
-        lines.append(f"- **Supporting IT Roles**: {ps.get('supporting_it_count', 0)}")
-        lines.append(f"- **Internships / Trainees**: {ps.get('internships_count', 0)}")
-        lines.append(f"- **Manual Verification Required**: {ps.get('manual_review_count', 0)}")
-        lines.append(f"- **Excluded Listings**: {ps.get('excluded_count', 0)}")
+        lines.append(f"- **🎯 Matched Opportunities (> 60% Score & PASS)**: **{ps.get('matched_jobs_count', 0)}** (`matched_jobs.json/csv/xlsx`)")
+        lines.append(f"- **Supporting IT Roles**: {ps.get('supporting_it_count', 0)} (`supporting_it_jobs.json/csv`)")
+        lines.append(f"- **Internships / Trainees**: {ps.get('internships_count', 0)} (`internships.json/csv`)")
+        lines.append(f"- **Manual Verification Required**: {ps.get('manual_review_count', 0)} (`manual_verification_jobs.json/csv/xlsx`)")
+        lines.append(f"- **Excluded Listings**: {ps.get('excluded_count', 0)} (`excluded_jobs.json`)")
 
         # Highlight top matched jobs if any
         matched_file = self.base_dir / "matched_jobs.json"

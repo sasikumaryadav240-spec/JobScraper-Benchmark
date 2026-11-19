@@ -110,12 +110,22 @@ class CanonicalJobRecord(BaseModel):
     # 9. Matching & Eligibility
     technical_skill_match_score: float = 0.0
     overall_match_score: float = 0.0
+    primary_role_family: Optional[str] = None
+    secondary_role_families: list[str] = Field(default_factory=list)
+    component_scores: dict[str, float] = Field(default_factory=dict)
+    eligibility_decisions: dict[str, str] = Field(default_factory=dict)
     matched_skills: list[dict[str, Any]] = Field(default_factory=list)
+    partially_matched_skills: list[dict[str, Any]] = Field(default_factory=list)
     missing_skills: list[str] = Field(default_factory=list)
+    learning_target_overlap: list[str] = Field(default_factory=list)
+    matched_requirements: list[str] = Field(default_factory=list)
+    partially_matched_requirements: list[str] = Field(default_factory=list)
+    missing_requirements: list[str] = Field(default_factory=list)
     relevant_experience: str = ""
     eligibility_status: str = EligibilityStatus.REVIEW_STATUS.value
     rejection_reasons: list[str] = Field(default_factory=list)
     manual_review_reasons: list[str] = Field(default_factory=list)
+    decision_reasons: list[str] = Field(default_factory=list)
 
     # 10. Provenance & Quality
     source_provenance: list[dict[str, Any]] = Field(default_factory=list)
@@ -132,13 +142,25 @@ class CanonicalJobRecord(BaseModel):
         data["all_source_ids"] = "; ".join(f"{k}: {', '.join(v)}" for k, v in (self.all_source_ids or {}).items())
         data["all_source_urls"] = "; ".join(self.all_source_urls or [])
         data["all_application_urls"] = "; ".join(self.all_application_urls or [])
+        data["secondary_role_families"] = "; ".join(self.secondary_role_families or [])
+        data["component_scores"] = "; ".join(f"{k}: {v:.1f}%" for k, v in (self.component_scores or {}).items())
+        data["eligibility_decisions"] = "; ".join(f"{k}: {v}" for k, v in (self.eligibility_decisions or {}).items())
         data["matched_skills"] = "; ".join(
             f"{s.get('name', '')} ({s.get('evidence_level', '')}:{s.get('match_value', 0)})"
             for s in (self.matched_skills or [])
         )
+        data["partially_matched_skills"] = "; ".join(
+            f"{s.get('name', '')} ({s.get('evidence_level', '')}:{s.get('match_value', 0)})"
+            for s in (self.partially_matched_skills or [])
+        )
         data["missing_skills"] = "; ".join(self.missing_skills or [])
+        data["learning_target_overlap"] = "; ".join(self.learning_target_overlap or [])
+        data["matched_requirements"] = "; ".join(self.matched_requirements or [])
+        data["partially_matched_requirements"] = "; ".join(self.partially_matched_requirements or [])
+        data["missing_requirements"] = "; ".join(self.missing_requirements or [])
         data["rejection_reasons"] = " | ".join(self.rejection_reasons or [])
         data["manual_review_reasons"] = " | ".join(self.manual_review_reasons or [])
+        data["decision_reasons"] = " | ".join(self.decision_reasons or [])
         data["data_quality_flags"] = "; ".join(self.data_quality_flags or [])
         data.pop("source_provenance", None)
         data.pop("field_origins", None)

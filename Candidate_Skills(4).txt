@@ -1,0 +1,365 @@
+MASTER CANDIDATE SKILLS PROFILE --- 15 ROLE FAMILIES
+Version: 2.0 | Updated: 9 November 2026
+
+1. Purpose and accuracy rules
+This profile consolidates the candidate's previously recorded skills
+with concepts and tools from all 15 cybersecurity, IT support and
+infrastructure role families.
+
+Proficiency labels
+Professional experience: explicitly used during paid employment/internship.
+Hands-on / practical: previously reported as used in labs, projects or exercises; not professional employment.
+Familiarity / fundamentals: conceptual or limited exposure; not independent administration.
+Learning target --- not yet verified: added from the role curricula; completion has not been established.
+Certification: credential, not employment.
+
+Never invent skills, projects, experience, proficiency or certifications. Labs, projects, coursework and familiarity must not be counted as professional employment. Every item marked "Learning target --- not yet verified" is included for planning and gap analysis, not as an existing resume claim.
+
+2. Education
+B.E. Electronics and Communication Engineering
+Saveetha School of Engineering, Chennai
+2022--2026
+CGPA: 7.94/10
+
+3. Professional experience
+MERN Stack Developer Intern --- Varnarc Pvt. Ltd.
+January 2026 -- April 2026
+Professional experience explicitly recorded:
+- Node.js, Express.js, MongoDB, REST APIs
+- JWT authentication, RBAC, least privilege
+- Input validation, structured logging, exception handling
+- Troubleshooting, application log investigation, security issue investigation
+- Root cause analysis, documentation, secure development practices
+
+This is professional software-development experience, not professional SOC, cybersecurity, IT support, system administration or network administration employment.
+
+4. Certifications
+CompTIA Security+ --- Passed
+Google Cybersecurity Professional Certificate
+
+---
+
+PART A --- CYBERSECURITY ROLE FAMILIES
+
+FAMILY 1 --- SOC ANALYST / SECURITY OPERATIONS
+Concepts
+Previously reported hands-on / practical lab experience:
+- Security monitoring, alert triage and alert investigation
+- Incident investigation, analysis, response, escalation and documentation
+- Security event analysis and false-positive analysis
+- Detection tuning, threat detection and threat hunting
+- IOC/TTP analysis, security timelines and event correlation
+- Root cause analysis, security reporting, SOPs and playbooks
+- Evidence collection fundamentals and MITRE ATT&CK
+- Incident response lifecycle: preparation, identification, analysis, containment, eradication, recovery, post-incident activity and lessons learned
+
+Tools
+Previously reported hands-on / practical: Microsoft Sentinel, KQL, Splunk, SPL, Elastic Security, Microsoft Defender XDR exposure, LimaCharlie EDR, Sysmon, Windows Event Logs, Wireshark, PowerShell, Bash.
+Previously reported familiarity / practice: IBM QRadar, RSA NetWitness, LogRhythm, ArcSight, CrowdStrike concepts, SentinelOne.
+Learning targets --- not yet verified: Sigma CLI/rule testing, Shuffle SOAR, advanced Defender XDR investigation and response, ATT&CK Navigator, MISP, Zeek, YARA, CyberChef, VirusTotal enrichment, TheHive, Logic Apps automation.
+
+FAMILY 2 --- SECURITY ANALYST / INFORMATION SECURITY ANALYST
+Concepts
+Previously reported practical / knowledge: security monitoring, event investigation, risk concepts, vulnerability assessment, severity analysis, risk-based prioritization, remediation recommendations, security hardening, IAM/access control fundamentals, endpoint/network security, incident investigation, root cause analysis, security documentation, compliance and third-party risk fundamentals.
+Tools and frameworks
+Previously reported: Nessus, Sentinel, Splunk, Microsoft Defender security concepts, Windows Event Logs, Wireshark, Entra ID fundamentals, PowerShell, NIST CSF fundamentals, CIS Controls fundamentals, ISO 27001 fundamentals.
+Learning targets --- not yet verified: Defender for Endpoint operational administration, Microsoft Purview, ServiceNow GRC/IRM, AuditBoard, Vanta, Drata, OneTrust, CIS-CAT, OpenSCAP, Power BI security/compliance reporting, formal control testing and audit evidence workflows.
+
+FAMILY 3 --- SIEM / DETECTION / INCIDENT RESPONSE
+Concepts
+Previously reported practical: SIEM monitoring, log analysis, security searches, event correlation, alert investigation, detection rule creation, detection tuning, dashboards, investigation timelines, KQL, SPL, threat hunting, incident response, false-positive analysis.
+Detection concepts recorded: suspicious PowerShell, brute-force, failed authentication, account lockout, suspicious logon, privilege escalation and anomalous behavior detection; MITRE ATT&CK mapping fundamentals.
+Tools
+Previously reported hands-on: Sentinel/KQL, Splunk/SPL, Elastic Security, Windows Event Logs, Sysmon, LimaCharlie EDR.
+Previously reported familiarity: QRadar, RSA NetWitness, LogRhythm, ArcSight.
+Learning targets --- not yet verified: Sigma, Sigma CLI, Shuffle SOAR, TheHive, MISP, Zeek, YARA, CyberChef, ATT&CK Navigator, Sentinel automation rules/playbooks, detection-as-code and version-controlled rule testing.
+
+FAMILY 4 --- SECURITY ENGINEERING
+Concepts
+Previously recorded foundations / adjacent experience: Windows security, Linux security, network security, firewall concepts, vulnerability assessment/remediation, secure coding, API security, IAM, RBAC, least privilege, PowerShell, Bash, Docker, Kubernetes fundamentals, Terraform exposure, logging, monitoring and hardening fundamentals.
+Tools
+Previously reported: PowerShell, Bash, Linux, Windows, Docker, Kubernetes fundamentals, Terraform exposure, Nessus, Wireshark, Defender security concepts, LimaCharlie, Sysmon.
+Learning targets --- not yet verified: Trivy, Checkov, TFLint, OPA, Conftest, Ansible, OpenSCAP, CIS-CAT, OpenSSL, Azure Key Vault, HashiCorp Vault, Falco, Kubescape, Syft, secure CI/CD, IaC security testing, Microsoft Threat Modeling Tool, production firewall and endpoint policy administration.
+
+FAMILY 5 --- CLOUD SECURITY
+Concepts
+Previously reported practical / familiarity: Microsoft Azure, Azure security concepts, AWS fundamentals, AWS CloudTrail, cloud security, cloud logging, cloud IAM, cloud monitoring, security controls, Sentinel, Terraform exposure, container/Kubernetes security fundamentals.
+Learning targets --- not yet verified: Azure RBAC administration, managed identities, VNet/NSG/routing, Storage security, Key Vault, Azure Policy, Defender for Cloud, Activity Logs, AWS IAM policies/roles, VPC/security groups, CloudTrail investigations, AWS Config/GuardDuty, cloud incident response, CSPM, Kubernetes workload hardening, Terraform policy-as-code.
+Tools
+Previously reported: Azure, Sentinel, AWS fundamentals, CloudTrail, Terraform, Docker, Kubernetes.
+Learning targets --- not yet verified: Azure Portal/CLI/PowerShell administration, Defender for Cloud, Azure Monitor, Network Watcher, Key Vault, AWS IAM/VPC/CloudWatch/Config/GuardDuty, Checkov, Trivy, OPA/Conftest, Kubescape, Falco.
+
+FAMILY 6 --- APPLICATION SECURITY / PRODUCT SECURITY
+Concepts
+Previously recorded: OWASP Top 10, SQL Injection, XSS, Command Injection, API and REST API security, authentication, authorization, RBAC, JWT security, input validation, secure coding, secure API development, secure authentication, AppSec and Secure SDLC fundamentals.
+Professional experience overlap: Node.js, Express.js, MongoDB, REST APIs, JWT, RBAC, least privilege, input validation, structured logging, exception handling and secure development practices.
+Learning targets --- not yet verified: advanced Burp testing, ZAP, SAST/DAST/SCA, Semgrep, SonarQube, Snyk, OWASP Dependency-Check, threat modeling, secure code review, CSRF/SSRF testing, CORS/cookie/header assessment, IDOR testing and software supply-chain security.
+Tools
+Previously recorded: Node.js, Express.js, MongoDB, REST APIs, JWT, Java, TypeScript, JavaScript, SQL.
+Learning targets --- not yet verified: Burp Suite, OWASP ZAP, Postman security testing, Semgrep, SonarQube, Snyk, OWASP Juice Shop, OWASP Dependency-Check.
+
+FAMILY 7 --- VULNERABILITY MANAGEMENT / SECURITY TESTING
+Concepts
+Previously reported hands-on: vulnerability scanning, assessment, analysis and identification; severity analysis; risk-based prioritization; remediation recommendations; vulnerability reporting.
+Previously reported knowledge: CVE, CVSS, remediation, patch management concepts, hardening, risk assessment, OWASP Top 10, API security and security testing fundamentals.
+Learning targets --- not yet verified: authenticated/unauthenticated enterprise scanning, scan policy tuning, false-positive validation, CVSS v4, EPSS, CISA KEV, remediation SLA tracking, retesting, OWASP WSTG, rules of engagement, penetration-test reporting, container/cloud vulnerability assessment.
+Tools
+Previously reported hands-on: Nessus.
+Learning targets --- not yet verified: advanced Nmap, Greenbone/OpenVAS, Qualys, Rapid7 InsightVM, Burp Suite, ZAP, Nikto, Metasploit, Trivy, Semgrep, CIS-CAT, OpenSCAP.
+
+FAMILY 8 --- IAM / IDENTITY AND ACCESS MANAGEMENT
+Concepts
+Previously recorded: IAM fundamentals, authentication, authorization, RBAC, least privilege, MFA, access control, Entra ID fundamentals, Conditional Access, identity security concepts.
+Learning targets --- not yet verified: joiner/mover/leaver lifecycle, Active Directory administration, Entra user/group/role administration, Group Policy, Kerberos/NTLM troubleshooting, LDAP/LDAPS, SAML, OAuth 2.0, OIDC, PIM, access reviews, entitlement management, service accounts, managed identities, PAM, IGA, identity threat detection.
+Tools
+Previously recorded: Entra ID fundamentals, Okta hands-on/practice, Conditional Access concepts.
+Learning targets --- not yet verified: Active Directory Users and Computers, Group Policy Management, Entra Admin Center, Microsoft Graph PowerShell, Keycloak, CyberArk, SailPoint, Entra PIM/Access Reviews, BloodHound CE.
+
+FAMILY 9 --- GRC / IT RISK / COMPLIANCE
+Concepts
+Previously reported knowledge / practice: NIST CSF, NIST security concepts, CIS Controls, ISO 27001 fundamentals, security risk concepts, policies, procedures, documentation, compliance and third-party risk fundamentals.
+Learning targets --- not yet verified: ISO 27001:2022 clauses and Annex A assessment, Statement of Applicability, risk register, risk treatment/acceptance, control design and operating-effectiveness testing, audit planning/evidence, corrective actions, vendor assessments, BCP/DR, RTO/RPO, NIST SP 800-53, CIS implementation groups, metrics/reporting, privacy/data governance, AI governance.
+Tools
+Previously recorded: Excel, security documentation/reporting, framework knowledge.
+Learning targets --- not yet verified: ServiceNow IRM/GRC, AuditBoard, Vanta, Drata, OneTrust, RSA Archer, MetricStream, LogicGate, SharePoint, Power BI, Jira, Confluence.
+
+FAMILY 10 --- SECURITY RESEARCH / THREAT INTELLIGENCE
+Concepts
+Previously recorded: threat intelligence fundamentals, IOC/TTP analysis, MITRE ATT&CK, threat hunting, OSINT concepts, phishing and suspicious email analysis, malicious URL/attachment concepts, social engineering, log analysis, IOC extraction and security reporting.
+Learning targets --- not yet verified: intelligence lifecycle, intelligence types, source reliability/confidence, threat actor/campaign analysis, IP/domain/URL/certificate investigation, STIX/TAXII, static/dynamic malware analysis, hashes/strings/metadata, YARA rule testing, email-header/attachment analysis, intelligence-to-detection.
+Tools
+Previously recorded: Wireshark, Sentinel, Splunk, Sysmon, PowerShell, Bash, Nessus; Mimecast practice and relevant email-security familiarity.
+Learning targets --- not yet verified: VirusTotal workflows, AbuseIPDB, URLhaus, AlienVault OTX, MISP, OpenCTI, GreyNoise, SecurityTrails, crt.sh, CyberChef, YARA, PEStudio, Detect It Easy, Ghidra, ANY.RUN, Hybrid Analysis, ExifTool, Procmon, ATT&CK Navigator.
+
+---
+
+PART B --- IT SUPPORT AND INFRASTRUCTURE ROLE FAMILIES
+
+Status note: These five families were added from the study curricula. Unless a skill is separately identified in the previously recorded sections above, treat the following role-specific material as Learning target --- not yet verified.
+
+FAMILY 11 --- HELP DESK TECHNICIAN
+Previously supported adjacent skills
+Windows/security fundamentals, PowerShell, Linux troubleshooting fundamentals, networking, DNS, DHCP, TCP/IP, authentication/access-control concepts, documentation and root cause analysis.
+Learning targets --- not yet verified
+Help desk operations, L1/L2/L3 responsibilities and escalation
+Ticket lifecycle, categorization, prioritization and ITIL
+Incident vs service request, SLA and resolution metrics
+Windows 11 user support and local accounts/groups
+Password resets, account lockouts and file permissions
+Microsoft 365 user support
+Outlook, Teams, OneDrive and SharePoint troubleshooting
+Printer/scanner/peripheral support
+Remote assistance, RDP and Quick Assist
+VPN and remote access troubleshooting
+Knowledge-base writing and user communication
+Endpoint security and phishing reporting
+Tools
+Previously recorded: Windows, PowerShell, Event Logs, networking commands and Microsoft security tools.
+Learning targets --- not yet verified: ServiceNow ITSM, Jira Service Management, Freshservice, Quick Assist, RDP, AnyDesk, TeamViewer, Microsoft 365 Admin Center, Outlook, Teams, OneDrive, SharePoint, Device Manager, Print Management, Windows Security, Credential Manager.
+
+FAMILY 12 --- DESKTOP SUPPORT ENGINEER
+Previously supported adjacent skills
+Windows troubleshooting, PowerShell, Event Logs, endpoint security, network connectivity and hardware/software troubleshooting fundamentals.
+Learning targets --- not yet verified
+Desktop/laptop hardware architecture and component diagnosis
+CPU, RAM, motherboard, GPU, SSD and HDD troubleshooting
+BIOS/UEFI, POST and boot troubleshooting
+Windows installation, imaging and deployment
+WinRE and boot recovery
+Drivers, Device Manager and resource management
+Processes, services and startup applications
+Registry and system configuration
+NTFS, FAT32, exFAT and Disk Management
+BSOD/minidump analysis
+Windows update and driver management
+Software installation, licensing and compatibility
+Microsoft Office installation/repair
+Printer drivers, queues and Print Spooler
+Docking stations, displays and peripherals
+BitLocker, endpoint protection, backup/recovery
+Asset inventory and hardware lifecycle
+Tools
+Previously recorded: Windows, PowerShell, Event Viewer and endpoint-security concepts.
+Learning targets --- not yet verified: Task Manager, Device Manager, Resource Monitor, Performance Monitor, Reliability Monitor, Disk Management, Registry Editor, WinRE, DISM, SFC, WinDbg, Windows ADK, Sysprep, Intune, Configuration Manager, Autopilot, HWiNFO, CrystalDiskInfo, CrystalDiskMark, CPU-Z, GPU-Z, MemTest86, Windows Memory Diagnostic, manufacturer diagnostics, Print Management, Veeam, Acronis.
+
+FAMILY 13 --- IT SUPPORT SPECIALIST
+Previously supported adjacent skills
+Windows/Linux fundamentals, networking, DNS/DHCP/TCP/IP, authentication, authorization, RBAC, MFA, Entra ID fundamentals, Conditional Access concepts, PowerShell, security logs, endpoint investigation, documentation and root cause analysis.
+Learning targets --- not yet verified
+Enterprise IT operations and ITIL 4/ITSM
+Incident, problem and change management
+CMDB and service catalogue
+Active Directory and Group Policy administration
+Entra ID user/group administration and hybrid identity
+Intune enrollment, configuration and compliance
+Microsoft 365 tenant administration
+Exchange Online and message trace
+Teams, OneDrive and SharePoint administration
+Enterprise application and SSO troubleshooting
+VPN, proxy and remote support
+Hardware/asset management
+Endpoint compliance, monitoring and reporting
+Tools
+Previously recorded: Windows, PowerShell, Entra ID fundamentals, Sentinel, Wireshark, Linux and Microsoft security tools.
+Learning targets --- not yet verified: ServiceNow ITSM, Jira Service Management, Freshservice, Active Directory Users and Computers, Group Policy Management, Entra Admin Center, Intune, Microsoft 365 Admin Center, Exchange Admin Center, Teams/SharePoint/OneDrive Admin Centers, Remote Connectivity Analyzer, Quick Assist, RDP, Lansweeper, ManageEngine ServiceDesk Plus.
+
+FAMILY 14 --- JUNIOR SYSTEM ADMINISTRATOR
+Previously supported adjacent skills
+Windows/Linux fundamentals, Linux users/groups/permissions/processes/networking, auth.log, syslog, journalctl, PowerShell, Bash, DNS, DHCP, TCP/IP, Azure/AWS fundamentals, Docker/Kubernetes fundamentals, Terraform exposure, Nessus, monitoring and log analysis.
+Learning targets --- not yet verified
+Windows Server installation, roles and features
+Active Directory Domain Services, domain controllers and replication
+Group Policy administration
+Windows DNS/DHCP administration
+File/print servers, SMB and NTFS/share permissions
+Linux server administration, systemd, APT/DNF
+SSH hardening, Linux storage, partitions and LVM
+Windows/Linux server monitoring
+Hyper-V, VMware and virtual networking
+Backup, restoration, disaster recovery and high availability
+Server hardening and patch management
+PowerShell/Bash automation and Ansible
+Tools
+Previously recorded: Windows, Ubuntu/Linux, PowerShell, Bash, Terraform, Docker, Kubernetes, Azure, AWS fundamentals, Nessus, Splunk and Sentinel.
+Learning targets --- not yet verified: Windows Server 2022/2025, Server Manager, Windows Admin Center, AD tools, GPMC, DNS/DHCP Manager, Windows Server Backup, Ubuntu Server, Rocky Linux/AlmaLinux, systemd, journalctl, LVM, UFW, firewalld, Hyper-V, VMware Workstation/ESXi/vSphere, VirtualBox, Proxmox, Zabbix, PRTG, Nagios, Prometheus, Grafana, Veeam, Restic, BorgBackup, Ansible, Git.
+
+FAMILY 15 --- NETWORK SUPPORT ASSOCIATE
+Previously reported hands-on / practical or foundational
+TCP/IP, DNS, DHCP, HTTP/HTTPS, TLS fundamentals, VPN fundamentals, firewalls, IDS/IPS concepts, network security, network traffic analysis, security/firewall logs, source/destination IP analysis, ports/protocols, Wireshark and Nessus.
+Learning targets --- not yet verified
+OSI/TCP-IP operational troubleshooting
+IPv4 subnetting, CIDR and VLSM
+Ethernet, MAC learning and switching
+VLANs, 802.1Q trunking and inter-VLAN routing
+Static routing, OSPF and BGP fundamentals
+STP, link aggregation and redundancy
+NAT/PAT, WAN and ISP connectivity
+DHCP scopes, reservations and relay
+DNS zones and record administration
+Wi-Fi, WPA2/WPA3 and enterprise 802.1X
+RADIUS, TACACS+, IPsec and remote-access VPN
+Firewall ACLs and rule management
+SNMP, Syslog, NetFlow and IPFIX
+Network monitoring, packet analysis and incident escalation
+Network diagrams, IPAM and change management
+IPv6, QoS and high availability
+Tools
+Previously recorded: Wireshark, Nessus, TCP/IP troubleshooting concepts, firewall log analysis and Cisco/firewall-vendor familiarity.
+Previously reported familiarity / practice: Cisco, Palo Alto, Fortinet, Check Point, F5, Zscaler and Netskope.
+Learning targets --- not yet verified: Cisco Packet Tracer, Cisco IOS CLI, GNS3, EVE-NG, Nmap, iperf3, tcpdump, PuTTY, Tera Term, Windows DNS/DHCP, BIND, ISC Kea, pfSense, OPNsense, FortiGate administration, Cisco WLC, Aruba Central, UniFi, OpenVPN, WireGuard, PRTG, Zabbix, LibreNMS, SolarWinds, NetBox, phpIPAM, draw.io, Visio, Azure Network Watcher, AWS VPC.
+
+---
+
+PART C --- CONSOLIDATED CROSS-FAMILY SKILLS INVENTORY
+Operating systems and endpoint administration
+Windows 10/11, Windows Server, Ubuntu/Linux, Windows Event Logs, Linux authentication logs, Linux permissions/users/groups, Linux processes/services, Windows services/processes, endpoint security, device/driver troubleshooting, system monitoring, backup and recovery.
+Networking
+TCP/IP, IPv4/subnetting, DNS, DHCP, HTTP/HTTPS, TLS, VPN, firewalls, IDS/IPS, routing, switching, VLANs, wireless networking, network traffic analysis, packet capture, network monitoring and documentation.
+Identity and access
+Authentication, authorization, RBAC, least privilege, MFA, Conditional Access, Active Directory, Entra ID, LDAP, Kerberos, NTLM, SAML, OAuth 2.0, OIDC, privileged access management.
+Security and governance
+SIEM, EDR/XDR, incident response, threat detection/hunting, vulnerability management, application security, cloud security, container security, hardening, risk assessment, ISO 27001, NIST CSF, CIS Controls, third-party risk and security documentation.
+Scripting, development and automation
+Previously recorded: Python, PowerShell, Bash, Java, JavaScript, TypeScript, SQL, Node.js, Express.js, MongoDB, REST APIs, JSON, CSV and Regex.
+Learning targets --- not yet verified: advanced PowerShell/Bash administration, Ansible, Terraform security workflows, Git-based infrastructure automation, robust Python automation and log parsing.
+Logging, monitoring and analysis
+Previously recorded: Splunk/SPL, Sentinel/KQL, Elastic Security, Windows Event Logs, Sysmon, Linux syslog/journalctl, AWS CloudTrail, Wireshark, firewall log analysis, IOC extraction, event correlation, dashboards and security reporting.
+Learning targets --- not yet verified: Zabbix, PRTG, Nagios, Prometheus, Grafana, NetFlow/IPFIX analysis, centralized infrastructure monitoring and advanced log pipelines.
+
+---
+
+PART D --- PROJECTS AND EVIDENCE REGISTER
+The following are project areas from the curricula. They are not automatically completed projects. Only mark a project completed after it has actually been built, tested and documented.
+
+Cybersecurity project areas
+SIEM investigation and incident report
+Password spraying investigation
+Endpoint investigation using Sysmon and EDR telemetry
+Sigma detection engineering and validation
+SOAR IOC enrichment and response workflow
+Vulnerability assessment and remediation report
+Secure REST API and application security assessment
+Azure infrastructure security assessment
+IAM lifecycle and identity investigation
+GRC risk register and control assessment
+Phishing and threat intelligence investigation
+YARA detection and malware analysis in an isolated lab
+
+IT support and infrastructure project areas
+Help Desk ticket simulation and knowledge base
+Windows 11 troubleshooting lab
+Hardware diagnostics and failure analysis
+Windows imaging and deployment
+Microsoft 365 support and troubleshooting
+Active Directory and Entra ID administration lab
+Intune endpoint management lab
+Windows Server and DNS/DHCP infrastructure lab
+Linux server administration and hardening
+Virtualization and server monitoring
+Backup and disaster recovery test
+PowerShell/Bash/Ansible administration automation
+Enterprise network design with VLANs and routing
+Wireshark packet-analysis investigation
+Network monitoring and alerting
+Firewall segmentation and VPN lab
+Network documentation and IPAM
+
+For each completed project, record: project name, date, environment, tasks personally performed, evidence/repository/report, limitations, and whether it was professional or non-professional.
+
+---
+
+PART E --- JOB MATCHING AND RESUME RULES
+1. Match classifications
+Strong match: core requirements directly supported by professional experience or relevant hands-on practice.
+Good match: most core requirements supported; limited gaps.
+Partial match: adjacent fundamentals exist, but important skills/tools are missing.
+Weak match: only a small portion of core responsibilities is supported.
+No match: essential capability is absent.
+
+2. Alternative tools
+Splunk OR Sentinel: credit the platform actually used; do not require both.
+Nessus / Qualys / OpenVAS: credit Nessus practical use and note the missing platform.
+EDR alternatives: credit demonstrated Defender XDR/LimaCharlie exposure while noting missing vendor-specific production experience.
+Cisco / Juniper / Aruba: general networking knowledge transfers, but vendor configuration experience must not be invented.
+ServiceNow / Jira Service Management / Freshservice: ITSM concepts do not equal hands-on platform administration.
+Hyper-V / VMware: virtualization fundamentals do not equal production hypervisor administration.
+Azure / AWS: cloud fundamentals do not equal production cloud engineering.
+
+3. Experience eligibility
+The candidate is a fresher for cybersecurity, IT support, system administration and network administration employment unless new professional employment is explicitly added.
+Professional experience currently recorded:
+- MERN Stack Developer Intern --- Varnarc Pvt. Ltd. --- January 2026 to April 2026.
+Never count SOC labs as SOC employment, security projects as cybersecurity employment, home labs as system administration employment, Packet Tracer exercises as professional network engineering employment, coursework as professional IT support employment, or platform familiarity as production administration.
+Experience filter: accept roles where the mandatory minimum experience is 0, 1 or 2 years, even if the advertised maximum is higher. Reject roles where the mandatory minimum is 3 or more years. Distinguish mandatory requirements from preferred experience and interpret ambiguous wording carefully.
+
+4. Match scoring model
+Required technical skills: 35%
+Core responsibilities: 25%
+Experience compatibility: 15%
+Tools and technologies: 10%
+Education and certifications: 5%
+Transferable skills: 10%
+Total: 100%. Include jobs scoring at least 50%, subject to mandatory eligibility filters. Do not inflate scores.
+
+5. Resume tailoring
+Tailor each resume to the actual role family and job description.
+Do not put all 15 families on every resume.
+Select relevant, defensible skills only.
+Prioritize professional experience and demonstrable projects.
+Clearly label labs and independent projects.
+Never present learning targets as completed skills.
+Never claim enterprise production administration without actual production responsibility.
+Do not add tools merely because they appear in a job description.
+Preserve exact certification names and education details.
+Ask when a required fact is missing; do not invent it.
+
+---
+
+PART F --- PROFILE MAINTENANCE
+When a learning target is completed, update it only after practical verification. Record: 1. Tool or concept. 2. Date practiced/completed. 3. Environment (home lab, academic, internship or production). 4. Tasks personally performed. 5. Evidence (repository, screenshots, configuration, report, ticket or lab notes). 6. Limitations and tasks not performed. 7. Whether the experience was professional or non-professional.
+Watching a tutorial is not sufficient to mark a tool hands-on. Practical completion means the candidate can independently perform and explain the task.
+
+FINAL AUTHORITATIVE PROFILE RULE
+This document is the consolidated working Candidate Skills Profile for all 15 role families. It supersedes the previous cybersecurity-only skills file for future job matching and resume tailoring, subject to the proficiency labels and accuracy rules above.
+It intentionally includes both previously recorded candidate skills and additional learning targets from the 15-role curricula. These groups must never be treated as equivalent.
+
