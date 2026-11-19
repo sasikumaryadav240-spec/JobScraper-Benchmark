@@ -10,13 +10,14 @@ that LinkedIn does not support is_remote and ignored the filter.
 """
 
 # Keep the list explicit. Bayt is excluded from the India-focused benchmark.
-SITES = ["linkedin", "indeed", "naukri"]
+SITES = ["linkedin", "indeed", "naukri", "glassdoor"]
 
 # Sources used for city-based searches.
 CITY_SITES = SITES.copy()
 
-# LinkedIn is deliberately excluded from remote-only searches.
-REMOTE_SITES = ["linkedin", "indeed", "naukri"]
+# LinkedIn is deliberately excluded from remote-only searches because JobSpy
+# reports that LinkedIn ignores the is_remote filter.
+REMOTE_SITES = ["indeed", "naukri", "glassdoor"]
 
 ROLES = [
     "SOC Analyst",
@@ -79,8 +80,8 @@ SEARCHES.extend(
     for role in REMOTE_ROLES
 )
 
-# Start conservatively. Do not increase until the smaller run is validated.
-RESULTS_PER_SEARCH = 150
+# Start conservatively with 50 results per search for sustainable runs.
+RESULTS_PER_SEARCH = 50
 POSTED_WITHIN_HOURS = 24
 COUNTRY_INDEED = "India"
 

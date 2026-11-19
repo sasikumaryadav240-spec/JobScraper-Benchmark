@@ -1,5 +1,4 @@
-
-name: Daily Job Scraper
+name: Daily Job Scraper & Matching Pipeline
 
 on:
   schedule:
@@ -7,6 +6,16 @@ on:
     - cron: "47 3 * * *"
 
   workflow_dispatch:
+    inputs:
+      run_mode:
+        description: "Pipeline execution mode"
+        required: false
+        default: "daily"
+        type: choice
+        options:
+          - daily
+          - full
+          - skip_scraping
 
 permissions:
   contents: read
@@ -16,35 +25,49 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scrape:
+  run-daily-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 60
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Show JobSpy Version
-        run: python -m pip show python-jobspy
+      - name: Run Test Suite Verification
+        run: |
+          python -m unittest discover tests -v
 
-      - name: Run Job Scraper
-        run: python run_jobspy.py
+      - name: Execute Daily Pipeline
+        run: |
+          MODE="${{ github.event.inputs.run_mode || 'daily' }}"
+          if [ "$MODE" = "full" ]; then
+            python run_daily_pipeline.py --full-run
+          elif [ "$MODE" = "skip_scraping" ]; then
+            python run_daily_pipeline.py --skip-scraping
+          else
+            python run_daily_pipeline.py --daily-run
+          fi
 
-      - name: Upload Job Results
+      - name: Upload Daily Artifacts (JSON, CSV, Excel, Reports)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: daily-job-results-${{ github.run_number }}
-          path: jobspy/
+          path: |
+            jobspy/*.json
+            jobspy/*.csv
+            jobspy/*.xlsx
+            jobspy/*.md
           if-no-files-found: warn
           retention-days: 7

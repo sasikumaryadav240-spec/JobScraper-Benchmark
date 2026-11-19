@@ -21,7 +21,11 @@ jobspy/*.json
 jobspy/*.jsonl
 jobspy/*.csv
 jobspy/*.xlsx
+jobspy/*.md
 
 # Local editor files
 .vscode/
 .idea/
+
+# Scratch & temporary workspace files
+scratch/

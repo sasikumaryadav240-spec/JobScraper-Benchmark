@@ -3,6 +3,14 @@ import json
 import re
 import hashlib
 import html
+import mimetypes
+
+# Guard against PermissionError when reading Windows registry in restricted environments
+try:
+    mimetypes.init()
+except PermissionError:
+    mimetypes._winreg = None
+    mimetypes.init = lambda *args, **kwargs: None
 
 import pandas as pd
 

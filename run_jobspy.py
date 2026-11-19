@@ -4,18 +4,20 @@ India-focused JobSpy collector with:
 - Bayt excluded from primary collection
 - graceful LinkedIn stop after HTTP 429 / block warnings
 - exact-URL deduplication that preserves search provenance
-- checkpoints, error logs, and data-quality report
+- checkpoints, stateful resumption, error logs, and data-quality report
 
 Run from this directory:
     python run_jobspy.py
 """
 
+import argparse
 import json
 import random
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import pandas as pd
@@ -34,6 +36,7 @@ from config import (
     STOP_LINKEDIN_AFTER_RATE_LIMIT,
     VERBOSE,
 )
+from models import JobRecord
 
 ROOT = Path(__file__).resolve().parent
 OUTPUT = ROOT / "jobspy"
@@ -46,28 +49,21 @@ SUMMARY_OUTPUT = OUTPUT / "jobspy_run_summary.json"
 QUALITY_OUTPUT = OUTPUT / "jobspy_quality_report.json"
 CHECKPOINT_OUTPUT = OUTPUT / "checkpoint.jsonl"
 
-run_started = datetime.now(timezone.utc)
-run_id = run_started.strftime("%Y%m%d_%H%M%S")
-raw_results = []
-run_errors = []
-search_stats = []
-disabled_sites = set()
 
-
-def write_json_atomic(path, data):
+def write_json_atomic(path: Path, data: Any) -> None:
     temp_path = path.with_suffix(path.suffix + ".tmp")
     with open(temp_path, "w", encoding="utf-8") as handle:
         json.dump(data, handle, indent=2, ensure_ascii=False, default=str)
     temp_path.replace(path)
 
 
-def json_safe_rows(dataframe):
+def json_safe_rows(dataframe: pd.DataFrame) -> List[Dict[str, Any]]:
     # Convert pandas NaN/NaT values to JSON null before serialization.
     safe = dataframe.astype(object).where(pd.notna(dataframe), None)
     return safe.to_dict(orient="records")
 
 
-def flatten_text(value):
+def flatten_text(value: Any) -> str:
     if isinstance(value, dict):
         return " ".join(flatten_text(v) for v in value.values())
     if isinstance(value, (list, tuple, set)):
@@ -75,7 +71,14 @@ def flatten_text(value):
     return str(value or "")
 
 
-def record_issue(issue_type, search, details, site="unknown"):
+def record_issue(
+    run_errors: List[Dict[str, Any]],
+    run_id: str,
+    issue_type: str,
+    search: Dict[str, Any],
+    details: Any,
+    site: str = "unknown"
+) -> None:
     run_errors.append({
         "run_id": run_id,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
@@ -88,15 +91,51 @@ def record_issue(issue_type, search, details, site="unknown"):
     })
 
 
-def save_checkpoint():
-    temp_path = CHECKPOINT_OUTPUT.with_suffix(".jsonl.tmp")
+def load_checkpoint(checkpoint_path: Path) -> Tuple[List[Dict[str, Any]], Set[Tuple[str, str, bool]]]:
+    """
+    Load previously collected records and identify already completed search keys.
+    Search key: (keyword, location, is_remote)
+    """
+    records = []
+    completed_searches = set()
+    if not checkpoint_path.exists():
+        return records, completed_searches
+
+    try:
+        with open(checkpoint_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line_str = line.strip()
+                if not line_str:
+                    continue
+                row = json.loads(line_str)
+                records.append(row)
+                kw = row.get("test_keyword")
+                loc = row.get("test_location")
+                is_rem = bool(row.get("test_is_remote", False))
+                if kw and loc:
+                    completed_searches.add((kw, loc, is_rem))
+    except Exception as exc:
+        print(f"Warning: Failed reading checkpoint at {checkpoint_path}: {exc}")
+
+    return records, completed_searches
+
+
+def save_checkpoint(records: List[Dict[str, Any]], checkpoint_path: Path) -> None:
+    temp_path = checkpoint_path.with_suffix(".jsonl.tmp")
     with open(temp_path, "w", encoding="utf-8") as handle:
-        for row in raw_results:
+        for row in records:
             handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-    temp_path.replace(CHECKPOINT_OUTPUT)
+    temp_path.replace(checkpoint_path)
 
 
-def normalize_url(url):
+def append_checkpoint_records(new_records: List[Dict[str, Any]], checkpoint_path: Path) -> None:
+    with open(checkpoint_path, "a", encoding="utf-8") as handle:
+        for row in new_records:
+            handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        handle.flush()
+
+
+def normalize_url(url: Any) -> str:
     """Remove fragments and common tracking parameters, retain job identifiers."""
     if not url or not isinstance(url, str):
         return ""
@@ -124,7 +163,7 @@ def normalize_url(url):
         return url.strip()
 
 
-def provenance_values(row, field):
+def provenance_values(row: Dict[str, Any], field: str) -> List[str]:
     value = row.get(field)
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return []
@@ -132,7 +171,7 @@ def provenance_values(row, field):
     return [text] if text else []
 
 
-def merge_records(rows):
+def merge_records(rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int, int]:
     """
     Deduplicate by normalized URL only.
     URL-less records are retained separately to avoid false-positive merges.
@@ -195,7 +234,7 @@ def merge_records(rows):
     return list(merged.values()) + no_url_rows, raw_with_url, len(no_url_rows)
 
 
-def missing_field_stats(records):
+def missing_field_stats(records: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     fields = [
         "title", "company", "location", "job_url", "description",
         "job_type", "experience_range", "date_posted",
@@ -216,7 +255,7 @@ def missing_field_stats(records):
     return result
 
 
-def detect_linkedin_rate_limit(errors, warnings):
+def detect_linkedin_rate_limit(errors: Any, warnings: Any) -> bool:
     text = (flatten_text(errors) + " " + flatten_text(warnings)).lower()
     indicators = [
         "429", "too many requests", "blocked: use a proxy",
@@ -225,225 +264,306 @@ def detect_linkedin_rate_limit(errors, warnings):
     return any(item in text for item in indicators)
 
 
-print("=" * 72)
-print("JOBSPY COLLECTION — QUALITY-FIRST CONFIGURATION")
-print("=" * 72)
-print("Run ID:", run_id)
-print("Configured sites:", ", ".join(SITES))
-print("City sources:", ", ".join(CITY_SITES))
-print("Remote sources:", ", ".join(REMOTE_SITES))
-print("Search combinations:", len(SEARCHES))
-print("Results per source/search:", RESULTS_PER_SEARCH)
-print("Posting window (hours):", POSTED_WITHIN_HOURS)
-print("Description fetching:", FETCH_DESCRIPTIONS)
-print("Bayt: excluded")
-print("=" * 72)
+def run_collection(
+    searches: List[Dict[str, Any]] = SEARCHES,
+    resume: bool = True,
+    clean: bool = False,
+    limit_searches: Optional[int] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    run_started = datetime.now(timezone.utc)
+    run_id = run_started.strftime("%Y%m%d_%H%M%S")
+    raw_results: List[Dict[str, Any]] = []
+    run_errors: List[Dict[str, Any]] = []
+    search_stats: List[Dict[str, Any]] = []
+    disabled_sites: Set[str] = set()
 
-CHECKPOINT_OUTPUT.write_text("", encoding="utf-8")
+    target_searches = searches[:limit_searches] if limit_searches else searches
+    completed_searches: Set[Tuple[str, str, bool]] = set()
 
-for index, search in enumerate(SEARCHES, start=1):
-    is_remote = bool(search.get("is_remote"))
-    requested_sites = REMOTE_SITES if is_remote else CITY_SITES
-    active_sites = [site for site in requested_sites if site not in disabled_sites]
+    if clean:
+        print("Clean run requested: clearing checkpoint file.")
+        CHECKPOINT_OUTPUT.write_text("", encoding="utf-8")
+    elif resume and CHECKPOINT_OUTPUT.exists():
+        raw_results, completed_searches = load_checkpoint(CHECKPOINT_OUTPUT)
+        if raw_results:
+            print(f"Resuming from checkpoint: loaded {len(raw_results)} records across {len(completed_searches)} prior search keys.")
 
-    label = "REMOTE INDIA" if is_remote else "CITY"
-    print(f"\n[{index}/{len(SEARCHES)}] {label}: {search['keyword']} | {search['location']}")
+    print("=" * 72)
+    print("JOBSPY COLLECTION — QUALITY-FIRST CONFIGURATION")
+    print("=" * 72)
+    print("Run ID:", run_id)
+    print("Configured sites:", ", ".join(SITES))
+    print("City sources:", ", ".join(CITY_SITES))
+    print("Remote sources:", ", ".join(REMOTE_SITES))
+    print("Search combinations:", len(target_searches))
+    print("Results per source/search:", RESULTS_PER_SEARCH)
+    print("Posting window (hours):", POSTED_WITHIN_HOURS)
+    print("Description fetching:", FETCH_DESCRIPTIONS)
+    print("Bayt: excluded")
+    print("Dry run mode:", dry_run)
+    print("=" * 72)
 
-    if not active_sites:
-        print("Skipped: no active sources remain for this search.")
+    if dry_run:
+        print("Dry run requested. No network calls will be made.")
+        return {"run_id": run_id, "dry_run": True, "target_searches": len(target_searches)}
+
+    for index, search in enumerate(target_searches, start=1):
+        is_remote = bool(search.get("is_remote"))
+        requested_sites = REMOTE_SITES if is_remote else CITY_SITES
+        active_sites = [site for site in requested_sites if site not in disabled_sites]
+
+        label = "REMOTE INDIA" if is_remote else "CITY"
+        search_key = (search["keyword"], search["location"], is_remote)
+        print(f"\n[{index}/{len(target_searches)}] {label}: {search['keyword']} | {search['location']}")
+
+        # Skip if already completed in checkpoint
+        if search_key in completed_searches:
+            print("Skipped: already completed in prior checkpoint run.")
+            search_stats.append({
+                **search,
+                "sites_requested": requested_sites,
+                "sites_run": [],
+                "records_returned": 0,
+                "records_by_site": {},
+                "status": "skipped_already_completed",
+            })
+            continue
+
+        if not active_sites:
+            print("Skipped: no active sources remain for this search.")
+            search_stats.append({
+                **search,
+                "sites_requested": requested_sites,
+                "sites_run": [],
+                "records_returned": 0,
+                "records_by_site": {},
+                "status": "skipped_no_active_sources",
+            })
+            continue
+
+        started = time.time()
+        returned = 0
+        site_counts: Dict[str, int] = {}
+        status = "completed"
+        new_records: List[Dict[str, Any]] = []
+
+        try:
+            jobs = scrape_jobs(
+                site_name=active_sites,
+                search_term=search["keyword"],
+                location=search["location"],
+                is_remote=is_remote,
+                results_wanted=RESULTS_PER_SEARCH,
+                hours_old=POSTED_WITHIN_HOURS,
+                country_indeed=COUNTRY_INDEED,
+                fetch_description=FETCH_DESCRIPTIONS,
+                verbose=VERBOSE,
+            )
+
+            errors = getattr(jobs, "attrs", {}).get("errors", {}) or {}
+            warnings = getattr(jobs, "attrs", {}).get("warnings", {}) or {}
+
+            for site, details in errors.items():
+                record_issue(run_errors, run_id, "scraper_error", search, details, site)
+            for site, details in warnings.items():
+                record_issue(run_errors, run_id, "scraper_warning", search, details, site)
+
+            if STOP_LINKEDIN_AFTER_RATE_LIMIT and "linkedin" in active_sites:
+                linkedin_errors = errors.get("linkedin", "")
+                linkedin_warnings = warnings.get("linkedin", "")
+                if detect_linkedin_rate_limit(linkedin_errors, linkedin_warnings):
+                    disabled_sites.add("linkedin")
+                    record_issue(
+                        run_errors,
+                        run_id,
+                        "source_disabled_rate_limit",
+                        search,
+                        "LinkedIn returned a 429/rate-limit/block signal; LinkedIn will be skipped for the rest of this run.",
+                        "linkedin",
+                    )
+                    print("LinkedIn rate-limit/block signal detected. LinkedIn disabled for remainder of run.")
+
+            rows = json_safe_rows(jobs)
+            collected_at = datetime.now(timezone.utc).isoformat()
+
+            for row in rows:
+                row["test_keyword"] = search["keyword"]
+                row["test_location"] = search["location"]
+                row["test_is_remote"] = is_remote
+                row["test_search_type"] = search.get("search_type", "unspecified")
+                row["benchmark_site"] = str(row.get("site") or "").lower()
+                row["collected_at"] = collected_at
+                row["run_id"] = run_id
+                new_records.append(row)
+                raw_results.append(row)
+
+                site = str(row.get("site") or "unknown").lower()
+                site_counts[site] = site_counts.get(site, 0) + 1
+
+            returned = len(rows)
+            if errors:
+                status = "completed_with_errors"
+            print("Returned:", returned, "| by source:", site_counts or "{}")
+            if warnings:
+                print("Warnings:", warnings)
+            if errors:
+                print("Errors:", errors)
+
+        except Exception as exc:
+            status = "exception"
+            record_issue(run_errors, run_id, "search_exception", search, repr(exc))
+            print("Search failed:", repr(exc))
+
+        elapsed = round(time.time() - started, 2)
         search_stats.append({
-            **search, "sites_requested": requested_sites,
-            "sites_run": [], "records_returned": 0,
-            "records_by_site": {}, "status": "skipped_no_active_sources",
+            **search,
+            "sites_requested": requested_sites,
+            "sites_run": active_sites,
+            "records_returned": returned,
+            "records_by_site": site_counts,
+            "elapsed_seconds": elapsed,
+            "status": status,
         })
-        continue
 
-    started = time.time()
-    returned = 0
-    site_counts = {}
-    status = "completed"
+        if new_records:
+            append_checkpoint_records(new_records, CHECKPOINT_OUTPUT)
+        completed_searches.add(search_key)
+        write_json_atomic(ERROR_OUTPUT, run_errors)
+        print(f"Completed in {elapsed}s")
 
-    try:
-        jobs = scrape_jobs(
-            site_name=active_sites,
-            search_term=search["keyword"],
-            location=search["location"],
-            is_remote=is_remote,
-            results_wanted=RESULTS_PER_SEARCH,
-            hours_old=POSTED_WITHIN_HOURS,
-            country_indeed=COUNTRY_INDEED,
-            fetch_description=FETCH_DESCRIPTIONS,
-            verbose=VERBOSE,
+        if index < len(target_searches):
+            delay = random.uniform(*DELAY_BETWEEN_SEARCHES_SECONDS)
+            print(f"Waiting {delay:.1f}s...")
+            time.sleep(delay)
+
+    # Final deduplication and model validation
+    deduped, raw_with_url, url_missing_count = merge_records(raw_results)
+
+    # Validate each deduplicated job with JobRecord model
+    validated_jobs: List[Dict[str, Any]] = []
+    for row in deduped:
+        try:
+            job_rec = JobRecord.from_raw_jobspy(row)
+            validated_jobs.append(row)
+        except Exception:
+            validated_jobs.append(row)
+
+    df = pd.DataFrame(validated_jobs)
+
+    if not df.empty:
+        df.to_csv(CSV_OUTPUT, index=False, encoding="utf-8-sig")
+        df.to_json(
+            JSON_OUTPUT, orient="records", indent=2,
+            force_ascii=False, date_format="iso",
+        )
+    else:
+        pd.DataFrame().to_csv(CSV_OUTPUT, index=False, encoding="utf-8-sig")
+        write_json_atomic(JSON_OUTPUT, [])
+
+    run_finished = datetime.now(timezone.utc)
+    site_counts_final: Dict[str, int] = {}
+    if not df.empty and "site" in df.columns:
+        site_counts_final = (
+            df["site"].fillna("unknown").astype(str).str.lower()
+            .value_counts().to_dict()
         )
 
-        errors = getattr(jobs, "attrs", {}).get("errors", {}) or {}
-        warnings = getattr(jobs, "attrs", {}).get("warnings", {}) or {}
+    quality = {
+        "run_id": run_id,
+        "unique_records": len(deduped),
+        "field_completeness": missing_field_stats(deduped),
+        "records_by_site_after_dedup": site_counts_final,
+        "records_missing_job_url": url_missing_count,
+        "remote_search_records": sum(
+            1 for row in deduped
+            if "remote_india" in row.get("matched_search_types", [])
+        ),
+        "notes": [
+            "Exact normalized URL deduplication is performed within the collection.",
+            "Cross-platform near-duplicate jobs are not automatically merged.",
+            "Remote search membership is not proof that a role is India-eligible; "
+            "verify location and work authorization before applying.",
+            "Date-only posting values do not reveal the exact posting time.",
+            "Description and experience completeness must be checked before matching.",
+        ],
+    }
 
-        for site, details in errors.items():
-            record_issue("scraper_error", search, details, site)
-        for site, details in warnings.items():
-            record_issue("scraper_warning", search, details, site)
+    summary = {
+        "run_id": run_id,
+        "started_at_utc": run_started.isoformat(),
+        "finished_at_utc": run_finished.isoformat(),
+        "duration_seconds": round((run_finished - run_started).total_seconds(), 2),
+        "configured_sites": SITES,
+        "city_sites": CITY_SITES,
+        "remote_sites": REMOTE_SITES,
+        "disabled_sites_during_run": sorted(disabled_sites),
+        "search_combinations_configured": len(target_searches),
+        "search_combinations_recorded": len(search_stats),
+        "raw_records_returned": len(raw_results),
+        "raw_records_with_job_url": raw_with_url,
+        "unique_records_after_normalized_url_dedup": len(deduped),
+        "duplicate_url_occurrences_removed": max(0, raw_with_url - (len(deduped) - url_missing_count)),
+        "records_without_job_url_retained": url_missing_count,
+        "issues_recorded": len(run_errors),
+        "records_by_site_after_dedup": site_counts_final,
+        "search_stats": search_stats,
+        "configuration": {
+            "results_per_search": RESULTS_PER_SEARCH,
+            "posted_within_hours": POSTED_WITHIN_HOURS,
+            "country_indeed": COUNTRY_INDEED,
+            "fetch_descriptions": FETCH_DESCRIPTIONS,
+            "delay_seconds": list(DELAY_BETWEEN_SEARCHES_SECONDS),
+        },
+        "output_files": {
+            "jobs_json": str(JSON_OUTPUT),
+            "jobs_csv": str(CSV_OUTPUT),
+            "errors_json": str(ERROR_OUTPUT),
+            "quality_report_json": str(QUALITY_OUTPUT),
+            "checkpoint_jsonl": str(CHECKPOINT_OUTPUT),
+        },
+    }
 
-        if STOP_LINKEDIN_AFTER_RATE_LIMIT and "linkedin" in active_sites:
-            linkedin_errors = errors.get("linkedin", "")
-            linkedin_warnings = warnings.get("linkedin", "")
-            if detect_linkedin_rate_limit(linkedin_errors, linkedin_warnings):
-                disabled_sites.add("linkedin")
-                record_issue(
-                    "source_disabled_rate_limit",
-                    search,
-                    "LinkedIn returned a 429/rate-limit/block signal; "
-                    "LinkedIn will be skipped for the rest of this run.",
-                    "linkedin",
-                )
-                print("LinkedIn rate-limit/block signal detected. "
-                      "LinkedIn disabled for the remainder of this run.")
-
-        rows = json_safe_rows(jobs)
-        collected_at = datetime.now(timezone.utc).isoformat()
-
-        for row in rows:
-            row["test_keyword"] = search["keyword"]
-            row["test_location"] = search["location"]
-            row["test_is_remote"] = is_remote
-            row["test_search_type"] = search.get("search_type", "unspecified")
-            row["benchmark_site"] = str(row.get("site") or "").lower()
-            row["collected_at"] = collected_at
-            row["run_id"] = run_id
-            raw_results.append(row)
-
-            site = str(row.get("site") or "unknown").lower()
-            site_counts[site] = site_counts.get(site, 0) + 1
-
-        returned = len(rows)
-        if errors:
-            status = "completed_with_errors"
-        print("Returned:", returned, "| by source:", site_counts or "{}")
-        if warnings:
-            print("Warnings:", warnings)
-        if errors:
-            print("Errors:", errors)
-
-    except Exception as exc:
-        status = "exception"
-        record_issue("search_exception", search, repr(exc))
-        print("Search failed:", repr(exc))
-
-    elapsed = round(time.time() - started, 2)
-    search_stats.append({
-        **search,
-        "sites_requested": requested_sites,
-        "sites_run": active_sites,
-        "records_returned": returned,
-        "records_by_site": site_counts,
-        "elapsed_seconds": elapsed,
-        "status": status,
-    })
-
-    save_checkpoint()
     write_json_atomic(ERROR_OUTPUT, run_errors)
-    print(f"Completed in {elapsed}s")
+    write_json_atomic(QUALITY_OUTPUT, quality)
+    write_json_atomic(SUMMARY_OUTPUT, summary)
 
-    if index < len(SEARCHES):
-        delay = random.uniform(*DELAY_BETWEEN_SEARCHES_SECONDS)
-        print(f"Waiting {delay:.1f}s...")
-        time.sleep(delay)
+    print("\n" + "=" * 72)
+    print("FINAL COLLECTION SUMMARY")
+    print("=" * 72)
+    print("Raw records:", len(raw_results))
+    print("Unique records:", len(deduped))
+    print("Duplicate URL occurrences removed:", summary["duplicate_url_occurrences_removed"])
+    print("URL-less records retained:", url_missing_count)
+    print("Issues:", len(run_errors))
+    print("Sources:", site_counts_final)
+    print("LinkedIn disabled during run:", "linkedin" in disabled_sites)
+    print("Jobs JSON:", JSON_OUTPUT)
+    print("Jobs CSV:", CSV_OUTPUT)
+    print("Errors:", ERROR_OUTPUT)
+    print("Quality report:", QUALITY_OUTPUT)
+    print("Run summary:", SUMMARY_OUTPUT)
+    print("Checkpoint:", CHECKPOINT_OUTPUT)
+    print("=" * 72)
 
-# Final deduplication and output.
-deduped, raw_with_url, url_missing_count = merge_records(raw_results)
-df = pd.DataFrame(deduped)
+    return summary
 
-if not df.empty:
-    df.to_csv(CSV_OUTPUT, index=False, encoding="utf-8-sig")
-    df.to_json(
-        JSON_OUTPUT, orient="records", indent=2,
-        force_ascii=False, date_format="iso",
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="India-focused Cybersecurity Job Collection Runner")
+    parser.add_argument("--clean", action="store_true", help="Clear existing checkpoint and start fresh")
+    parser.add_argument("--resume", action="store_true", default=True, help="Resume from existing checkpoint if available")
+    parser.add_argument("--limit-searches", type=int, default=None, help="Limit to N search combinations for testing")
+    parser.add_argument("--dry-run", action="store_true", help="Display execution plan without scraping")
+    args = parser.parse_args()
+
+    run_collection(
+        resume=not args.clean,
+        clean=args.clean,
+        limit_searches=args.limit_searches,
+        dry_run=args.dry_run,
     )
-else:
-    pd.DataFrame().to_csv(CSV_OUTPUT, index=False, encoding="utf-8-sig")
-    write_json_atomic(JSON_OUTPUT, [])
 
-run_finished = datetime.now(timezone.utc)
-site_counts_final = {}
-if not df.empty and "site" in df.columns:
-    site_counts_final = (
-        df["site"].fillna("unknown").astype(str).str.lower()
-        .value_counts().to_dict()
-    )
 
-quality = {
-    "run_id": run_id,
-    "unique_records": len(deduped),
-    "field_completeness": missing_field_stats(deduped),
-    "records_by_site_after_dedup": site_counts_final,
-    "records_missing_job_url": url_missing_count,
-    "remote_search_records": sum(
-        1 for row in deduped
-        if "remote_india" in row.get("matched_search_types", [])
-    ),
-    "notes": [
-        "Exact normalized URL deduplication is performed within the collection.",
-        "Cross-platform near-duplicate jobs are not automatically merged.",
-        "Remote search membership is not proof that a role is India-eligible; "
-        "verify location and work authorization before applying.",
-        "Date-only posting values do not reveal the exact posting time.",
-        "Description and experience completeness must be checked before matching.",
-    ],
-}
-
-summary = {
-    "run_id": run_id,
-    "started_at_utc": run_started.isoformat(),
-    "finished_at_utc": run_finished.isoformat(),
-    "duration_seconds": round((run_finished - run_started).total_seconds(), 2),
-    "configured_sites": SITES,
-    "city_sites": CITY_SITES,
-    "remote_sites": REMOTE_SITES,
-    "disabled_sites_during_run": sorted(disabled_sites),
-    "search_combinations_configured": len(SEARCHES),
-    "search_combinations_recorded": len(search_stats),
-    "raw_records_returned": len(raw_results),
-    "raw_records_with_job_url": raw_with_url,
-    "unique_records_after_normalized_url_dedup": len(deduped),
-    "duplicate_url_occurrences_removed": max(0, raw_with_url - (len(deduped) - url_missing_count)),
-    "records_without_job_url_retained": url_missing_count,
-    "issues_recorded": len(run_errors),
-    "records_by_site_after_dedup": site_counts_final,
-    "search_stats": search_stats,
-    "configuration": {
-        "results_per_search": RESULTS_PER_SEARCH,
-        "posted_within_hours": POSTED_WITHIN_HOURS,
-        "country_indeed": COUNTRY_INDEED,
-        "fetch_descriptions": FETCH_DESCRIPTIONS,
-        "delay_seconds": list(DELAY_BETWEEN_SEARCHES_SECONDS),
-    },
-    "output_files": {
-        "jobs_json": str(JSON_OUTPUT),
-        "jobs_csv": str(CSV_OUTPUT),
-        "errors_json": str(ERROR_OUTPUT),
-        "quality_report_json": str(QUALITY_OUTPUT),
-        "checkpoint_jsonl": str(CHECKPOINT_OUTPUT),
-    },
-}
-
-write_json_atomic(ERROR_OUTPUT, run_errors)
-write_json_atomic(QUALITY_OUTPUT, quality)
-write_json_atomic(SUMMARY_OUTPUT, summary)
-
-print("\n" + "=" * 72)
-print("FINAL COLLECTION SUMMARY")
-print("=" * 72)
-print("Raw records:", len(raw_results))
-print("Unique records:", len(deduped))
-print("Duplicate URL occurrences removed:", summary["duplicate_url_occurrences_removed"])
-print("URL-less records retained:", url_missing_count)
-print("Issues:", len(run_errors))
-print("Sources:", site_counts_final)
-print("LinkedIn disabled during run:", "linkedin" in disabled_sites)
-print("Jobs JSON:", JSON_OUTPUT)
-print("Jobs CSV:", CSV_OUTPUT)
-print("Errors:", ERROR_OUTPUT)
-print("Quality report:", QUALITY_OUTPUT)
-print("Run summary:", SUMMARY_OUTPUT)
-print("Checkpoint:", CHECKPOINT_OUTPUT)
-print("=" * 72)
+if __name__ == "__main__":
+    main()
