@@ -2,15 +2,15 @@
 Master Orchestrator for Daily Job Collection, Deduplication, and Matching Pipeline.
 
 Coordinates:
-1. Indeed collection (fault-isolated)
-2. Naukri collection (fault-isolated)
-3. LinkedIn collection (fault-isolated)
+1. Indeed collection (fault-isolated, extracting unique and raw records accurately)
+2. Naukri collection (fault-isolated, invoking supported collector.run(plan=plan) signature)
+3. LinkedIn collection (fault-isolated, invoking supported collector.run(plan=plan) signature)
 4. ATS collection: Greenhouse, Lever, Ashby (fault-isolated)
-5. Unified Normalization & Ingestion
-6. Cross-Source Deduplication
-7. Candidate Skill Matching & Eligibility Engine
+5. Unified Normalization & Ingestion with source-level provenance tracking
+6. Cross-Source Deduplication & Pre-match Master Dataset Export
+7. Candidate Skill Matching & Eligibility Engine (Authoritative Version 2.0, 15 Role Families)
 8. Multi-format Output Generation (JSON, CSV, Excel)
-9. Daily Run Telemetry, Quality Audits & Markdown Reporting
+9. Daily Run Telemetry, Quality Audits & Markdown Reporting distinguishing complete vs partial runs
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class DailyPipelineOrchestrator:
     def __init__(self, base_dir: str | Path = "jobspy", run_mode: str = "daily"):
         self.base_dir = Path(base_dir)
         self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.run_mode = run_mode  # 'daily' | 'full' | 'skip_scraping' | 'dry_run'
+        self.run_mode = run_mode  # 'daily' | 'full' | 'skip_scraping'
         self.run_id = f"daily_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
         self.start_time = datetime.now(timezone.utc)
         self.source_telemetry: dict[str, dict[str, Any]] = {}
@@ -63,13 +63,15 @@ class DailyPipelineOrchestrator:
         return "STALE", mtime_iso
 
     def run_indeed(self) -> None:
-        """Execute Indeed collector with fault isolation."""
+        """Execute Indeed collector with fault isolation and accurate metric extraction."""
         logger.info("=== [1/4] INDEED COLLECTION STAGE ===")
         t0 = time.time()
         source_name = "indeed"
         collected_in_run = False
         status = "FAILED"
-        rec_count = 0
+        raw_count = 0
+        unique_count = 0
+        duplicates_removed = 0
         err_msg = None
 
         try:
@@ -78,16 +80,27 @@ class DailyPipelineOrchestrator:
             if self.run_mode == "full":
                 searches = cfg.SEARCHES
             else:
-                # Representative daily searches
                 rep_roles = ["SOC Analyst", "Cybersecurity Analyst", "SIEM Analyst", "Cloud Security Analyst"]
                 rep_locations = ["Bengaluru", "Hyderabad"]
                 searches = cfg.generate_search_plan(roles=rep_roles, locations=rep_locations, include_remote=True)
 
             res = collector.run(searches=searches, clean=False)
-            status = "SUCCESS" if res.get("unique_records") else "PARTIAL"
-            rec_count = len(res.get("records", [])) or res.get("unique_records", 0)
+            # Correct return dictionary parsing from IndeedCollector.run
+            raw_count = res.get("raw_records_returned", 0)
+            unique_count = res.get("unique_records_after_dedup", 0)
+            duplicates_removed = res.get("duplicates_removed", 0)
+            issues_recorded = res.get("issues_recorded", 0)
+
             collected_in_run = True
-            logger.info(f"Indeed collection completed: {rec_count} records.")
+            if unique_count > 0:
+                status = "PARTIAL" if issues_recorded > 0 else "SUCCESS"
+            else:
+                status = "FAILED" if issues_recorded > 0 else "EMPTY_SUCCESS"
+
+            logger.info(
+                f"Indeed collection completed: {unique_count} unique records "
+                f"(raw={raw_count}, duplicates_removed={duplicates_removed}, status={status})."
+            )
         except Exception as e:
             err_msg = str(e)
             logger.error(f"Indeed stage encountered an error: {e}", exc_info=True)
@@ -100,36 +113,56 @@ class DailyPipelineOrchestrator:
             "status": status,
             "freshness": freshness,
             "duration_seconds": duration,
-            "records_count": rec_count,
+            "records_count": unique_count,
+            "raw_records_count": raw_count,
+            "duplicates_removed": duplicates_removed,
             "last_collection_time": timestamp,
             "error": err_msg,
         }
 
     def run_naukri(self) -> None:
-        """Execute Naukri collector with fault isolation."""
+        """Execute Naukri collector with fault isolation using its supported run(plan=plan) signature."""
         logger.info("=== [2/4] NAUKRI COLLECTION STAGE ===")
         t0 = time.time()
         source_name = "naukri"
         collected_in_run = False
         status = "FAILED"
         rec_count = 0
+        raw_count = 0
         err_msg = None
 
         try:
             collector = NaukriCollector(checkpoint_path=self.base_dir / "naukri_checkpoint.jsonl")
             import naukri_config as cfg
             if self.run_mode == "full":
-                searches = cfg.build_search_plan()
+                plan = cfg.build_search_plan()
             else:
                 rep_roles = ["SOC Analyst", "Cybersecurity Analyst", "SIEM Analyst"]
                 rep_locations = ["Bengaluru", "Hyderabad"]
-                searches = cfg.build_search_plan(roles=rep_roles, cities=rep_locations, include_remote=True)
+                plan = cfg.build_search_plan(roles=rep_roles, cities=rep_locations, include_remote=True)
 
-            res = collector.run(searches=searches, clean=False)
+            # Invoke collector with supported method signature: run(plan=plan)
+            res = collector.run(plan=plan)
             rec_count = len(res)
-            status = "SUCCESS" if rec_count else "PARTIAL"
+            raw_count = len(collector.raw_records)
             collected_in_run = True
-            logger.info(f"Naukri collection completed: {rec_count} records.")
+
+            has_errors = bool(collector.run_errors)
+            has_406 = any(e.get("status_code") == 406 or "406" in str(e) for e in collector.run_errors)
+
+            if rec_count > 0:
+                status = "PARTIAL" if has_errors else "SUCCESS"
+            else:
+                if has_406:
+                    status = "FAILED"
+                    err_msg = "HTTP 406 reCAPTCHA challenge triggered / circuit breaker tripped"
+                elif has_errors:
+                    status = "FAILED"
+                    err_msg = str(collector.run_errors[-1].get("error_message") or "Collection errors occurred")
+                else:
+                    status = "EMPTY_SUCCESS"
+
+            logger.info(f"Naukri collection completed: {rec_count} unique records (raw={raw_count}, status={status}).")
         except Exception as e:
             err_msg = str(e)
             logger.error(f"Naukri stage encountered an error: {e}", exc_info=True)
@@ -143,35 +176,54 @@ class DailyPipelineOrchestrator:
             "freshness": freshness,
             "duration_seconds": duration,
             "records_count": rec_count,
+            "raw_records_count": raw_count,
             "last_collection_time": timestamp,
             "error": err_msg,
         }
 
     def run_linkedin(self) -> None:
-        """Execute LinkedIn collector with fault isolation."""
+        """Execute LinkedIn collector with fault isolation using its supported run(plan=plan) signature."""
         logger.info("=== [3/4] LINKEDIN COLLECTION STAGE ===")
         t0 = time.time()
         source_name = "linkedin"
         collected_in_run = False
         status = "FAILED"
         rec_count = 0
+        raw_count = 0
         err_msg = None
 
         try:
             collector = LinkedInCollector(checkpoint_path=self.base_dir / "linkedin_checkpoint.jsonl")
             import linkedin_config as cfg
             if self.run_mode == "full":
-                searches = cfg.build_search_plan()
+                plan = cfg.build_search_plan()
             else:
                 rep_roles = ["SOC Analyst", "Cybersecurity Analyst", "Cloud Security Analyst"]
                 rep_locations = ["Bengaluru", "Hyderabad"]
-                searches = cfg.build_search_plan(roles=rep_roles, cities=rep_locations, include_remote=True)
+                plan = cfg.build_search_plan(roles=rep_roles, cities=rep_locations, include_remote=True)
 
-            res = collector.run(searches=searches, clean=False)
+            # Invoke collector with supported method signature: run(plan=plan)
+            res = collector.run(plan=plan)
             rec_count = len(res)
-            status = "SUCCESS" if rec_count else "PARTIAL"
+            raw_count = len(collector.raw_records)
             collected_in_run = True
-            logger.info(f"LinkedIn collection completed: {rec_count} records.")
+
+            has_errors = bool(collector.run_errors)
+            has_429 = any(e.get("status_code") == 429 or "429" in str(e) for e in collector.run_errors)
+
+            if rec_count > 0:
+                status = "PARTIAL" if has_errors or has_429 else "SUCCESS"
+            else:
+                if has_429:
+                    status = "RATE_LIMITED"
+                    err_msg = "HTTP 429 Rate Limited by LinkedIn"
+                elif has_errors:
+                    status = "FAILED"
+                    err_msg = str(collector.run_errors[-1].get("error_message") or "Collection errors occurred")
+                else:
+                    status = "EMPTY_SUCCESS"
+
+            logger.info(f"LinkedIn collection completed: {rec_count} unique records (raw={raw_count}, status={status}).")
         except Exception as e:
             err_msg = str(e)
             logger.error(f"LinkedIn stage encountered an error: {e}", exc_info=True)
@@ -185,6 +237,7 @@ class DailyPipelineOrchestrator:
             "freshness": freshness,
             "duration_seconds": duration,
             "records_count": rec_count,
+            "raw_records_count": raw_count,
             "last_collection_time": timestamp,
             "error": err_msg,
         }
@@ -197,15 +250,23 @@ class DailyPipelineOrchestrator:
         collected_in_run = False
         status = "FAILED"
         rec_count = 0
+        raw_count = 0
         err_msg = None
 
         try:
             collector = ATSCollector()
             res = collector.run()
             rec_count = len(res)
-            status = "SUCCESS" if rec_count else "PARTIAL"
+            raw_count = len(collector.raw_records)
             collected_in_run = True
-            logger.info(f"ATS collection completed: {rec_count} records.")
+
+            has_errors = bool(collector.run_errors)
+            if rec_count > 0:
+                status = "PARTIAL" if has_errors else "SUCCESS"
+            else:
+                status = "FAILED" if has_errors else "EMPTY_SUCCESS"
+
+            logger.info(f"ATS collection completed: {rec_count} unique records (raw={raw_count}, status={status}).")
         except Exception as e:
             err_msg = str(e)
             logger.error(f"ATS stage encountered an error: {e}", exc_info=True)
@@ -219,6 +280,7 @@ class DailyPipelineOrchestrator:
             "freshness": freshness,
             "duration_seconds": duration,
             "records_count": rec_count,
+            "raw_records_count": raw_count,
             "last_collection_time": timestamp,
             "error": err_msg,
         }
@@ -253,11 +315,25 @@ class DailyPipelineOrchestrator:
                     "freshness": freshness,
                     "duration_seconds": 0.0,
                     "records_count": count,
+                    "raw_records_count": count,
                     "last_collection_time": timestamp,
                     "error": None,
                 }
 
-        # Execute Phase 5 Unified Pipeline
+        # Determine overall source collection outcome
+        succeeded_sources = [s for s, t in self.source_telemetry.items() if t["status"] in ("SUCCESS", "EMPTY_SUCCESS")]
+        partial_sources = [s for s, t in self.source_telemetry.items() if t["status"] in ("PARTIAL", "RATE_LIMITED")]
+        failed_sources = [s for s, t in self.source_telemetry.items() if t["status"] == "FAILED"]
+        cached_sources = [s for s, t in self.source_telemetry.items() if t.get("freshness") in ("CACHED_RECENT", "STALE")]
+
+        if failed_sources or partial_sources:
+            overall_run_status = "PARTIAL_EXECUTION"
+        elif len(succeeded_sources) == len(self.source_telemetry):
+            overall_run_status = "COMPLETE_SUCCESS"
+        else:
+            overall_run_status = "PARTIAL_EXECUTION"
+
+        # Execute Unified Normalization, Deduplication, and Matching Pipeline
         logger.info("=== [UNIFIED PIPELINE STAGE] ===")
         t_pipe = time.time()
         pipeline = UnifiedPipeline(base_dir=self.base_dir)
@@ -270,11 +346,20 @@ class DailyPipelineOrchestrator:
         # Build Daily Run Summary JSON
         run_summary = {
             "run_id": self.run_id,
+            "overall_run_status": overall_run_status,
             "execution_mode": self.run_mode,
             "start_time_utc": self.start_time.isoformat(),
             "end_time_utc": end_time.isoformat(),
             "total_duration_seconds": total_duration,
+            "pipeline_stage_duration_seconds": pipe_duration,
             "source_telemetry": self.source_telemetry,
+            "source_status_breakdown": {
+                "succeeded": succeeded_sources,
+                "partial": partial_sources,
+                "failed": failed_sources,
+                "cached_ingested": cached_sources,
+                "complete_collection_achieved": (overall_run_status == "COMPLETE_SUCCESS"),
+            },
             "pipeline_summary": pipeline_summary,
             "errors_count": len(self.run_errors),
             "errors": self.run_errors,
@@ -303,24 +388,66 @@ class DailyPipelineOrchestrator:
             except Exception as e:
                 logger.warning(f"Could not write to GITHUB_STEP_SUMMARY: {e}")
 
-        logger.info(f"Daily pipeline finished successfully in {total_duration}s. Report saved to {report_path}")
+        logger.info(
+            f"Daily pipeline finished [{overall_run_status}] in {total_duration}s. "
+            f"Report saved to {report_path}"
+        )
         return 0
 
     def _build_markdown_report(self, summary: dict[str, Any]) -> str:
-        """Create formatted markdown summary for humans and CI."""
+        """Create formatted markdown summary for humans and CI with prominent completeness attribution."""
         lines = []
+        overall_status = summary.get("overall_run_status", "UNKNOWN")
+        status_banner = "🟢 COMPLETE SUCCESS" if overall_status == "COMPLETE_SUCCESS" else f"🟡 {overall_status}"
+
         lines.append(f"# 🛡️ Daily Cybersecurity Job Collection Report")
-        lines.append(f"**Run ID**: `{summary['run_id']}` | **Executed (UTC)**: `{summary['start_time_utc']}` | **Duration**: `{summary['total_duration_seconds']}s`\n")
+        lines.append(f"**Run ID**: `{summary['run_id']}` | **Status**: **{status_banner}** | **Duration**: `{summary['total_duration_seconds']}s`\n")
 
         lines.append("## 1. Source Collection Status")
-        lines.append("| Source | Status | Freshness | Records | Duration | Details |")
-        lines.append("|---|---|---|---|---|---|")
+        lines.append("| Source | Status | Data Freshness | Unique Records | Raw Records | Duration | Details |")
+        lines.append("|---|---|---|---|---|---|---|")
         for src, t in summary["source_telemetry"].items():
-            status_badge = "✅ SUCCESS" if t["status"] == "SUCCESS" else ("⚠️ " + t["status"])
-            fresh_badge = "🟢 FRESH" if t["freshness"] == "FRESH" else ("🟡 " + t["freshness"])
+            st = t["status"]
+            if st == "SUCCESS":
+                status_badge = "✅ SUCCESS"
+            elif st == "PARTIAL":
+                status_badge = "⚠️ PARTIAL"
+            elif st == "RATE_LIMITED":
+                status_badge = "⏳ RATE_LIMITED"
+            elif st == "EMPTY_SUCCESS":
+                status_badge = "⚪ EMPTY_SUCCESS"
+            elif st == "SKIPPED":
+                status_badge = "⏭️ SKIPPED"
+            else:
+                status_badge = f"❌ {st}"
+
+            fresh = t["freshness"]
+            if fresh == "FRESH":
+                fresh_badge = "🟢 FRESH"
+            elif fresh == "CACHED_RECENT":
+                fresh_badge = "🟡 CACHED_RECENT"
+            elif fresh == "STALE":
+                fresh_badge = "🟠 STALE"
+            else:
+                fresh_badge = "🔴 UNAVAILABLE"
+
+            raw_c = t.get("raw_records_count", t.get("records_count", 0))
+            unique_c = t.get("records_count", 0)
+            err_text = t.get("error") or "OK"
+
             lines.append(
-                f"| **{src.upper()}** | {status_badge} | {fresh_badge} | {t['records_count']} | {t['duration_seconds']}s | {t.get('error') or 'OK'} |"
+                f"| **{src.upper()}** | {status_badge} | {fresh_badge} | **{unique_c}** | {raw_c} | {t['duration_seconds']}s | {err_text} |"
             )
+
+        breakdown = summary.get("source_status_breakdown", {})
+        lines.append("\n### Source Integrity Breakdown:")
+        lines.append(f"- **Complete Collection Achieved**: `{'YES' if breakdown.get('complete_collection_achieved') else 'NO (Partial Run)'}`")
+        if breakdown.get("failed"):
+            lines.append(f"- **❌ Failed Sources**: {', '.join(s.upper() for s in breakdown['failed'])}")
+        if breakdown.get("partial"):
+            lines.append(f"- **⚠️ Partial / Rate-Limited Sources**: {', '.join(s.upper() for s in breakdown['partial'])}")
+        if breakdown.get("cached_ingested"):
+            lines.append(f"- **🟡 Sources Using Cached/Historical Data**: {', '.join(s.upper() for s in breakdown['cached_ingested'])}")
 
         ps = summary.get("pipeline_summary", {})
         lines.append("\n## 2. Processing & Candidate Matching Summary")
