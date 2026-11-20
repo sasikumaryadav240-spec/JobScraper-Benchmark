@@ -31,6 +31,7 @@ from models import JobRecord, WorkMode
 from linkedin_config import (
     CIRCUIT_BREAKER_CONSECUTIVE_FAILURES,
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+    DEFAULT_REQUEST_INTERVAL_SECONDS,
     DELAY_BETWEEN_DETAILS_SECONDS,
     DELAY_BETWEEN_SEARCHES_SECONDS,
     FETCH_DESCRIPTIONS,
@@ -49,6 +50,14 @@ from linkedin_config import (
 )
 from linkedin_dedup import deduplicate_linkedin_records
 from linkedin_parser import DescriptionType, parse_linkedin_record
+from request_pacer import (
+    CircuitBreaker,
+    RequestPacer,
+    calculate_backoff,
+    get_global_pacer,
+    install_request_pacer,
+    parse_retry_after,
+)
 
 logger = logging.getLogger("LinkedInCollector")
 if not logger.handlers:
@@ -131,29 +140,36 @@ class LinkedInCollector:
         self.run_errors: list[dict[str, Any]] = []
         self.search_stats: list[dict[str, Any]] = []
         self.circuit_breaker_triggered = False
+        self.resumed_from_checkpoint_count = 0
+        self.current_run_raw_count = 0
+
+        self.pacer = install_request_pacer()
+        self.circuit_breaker = CircuitBreaker(
+            source_name="linkedin",
+            consecutive_failure_threshold=CIRCUIT_BREAKER_CONSECUTIVE_FAILURES,
+            cooldown_seconds=CIRCUIT_BREAKER_COOLDOWN_SECONDS,
+        )
 
         self._patch_jobspy_detail_pacing()
 
     def _patch_jobspy_detail_pacing(self) -> None:
         """
-        Wrap LinkedIn._fetch_details to add polite delay between individual job detail requests.
-        Prevents back-to-back 0ms bursts to /jobs/view/{job_id}.
+        Wrap LinkedIn._fetch_details to ensure every job detail request strictly obeys
+        centralized request pacing (minimum 10.0s interval) before hitting /jobs/view/{job_id}.
         """
         orig_fetch = getattr(LinkedIn, "_fetch_details", None)
         if not orig_fetch or getattr(LinkedIn, "_detail_pacing_applied", False):
             return
 
-        detail_delays = self.detail_delays
+        pacer = self.pacer
 
         def polite_fetch_details(scraper_self: Any, job_id: str) -> dict[str, object]:
-            # Polite pacing before detail request
-            delay = random.uniform(*detail_delays)
-            time.sleep(delay)
+            pacer.wait_before_request(f"{scraper_self.base_url}/jobs/view/{job_id}")
             return orig_fetch(scraper_self, job_id)
 
         LinkedIn._fetch_details = polite_fetch_details
         LinkedIn._detail_pacing_applied = True
-        logger.info(f"Patched LinkedIn detail fetching with polite pacing {detail_delays}s")
+        logger.info("Patched LinkedIn detail fetching with centralized RequestPacer (>= 10.0s interval).")
 
     def load_checkpoint(self) -> int:
         """
@@ -181,6 +197,7 @@ class LinkedInCollector:
                         count += 1
                     except json.JSONDecodeError:
                         continue
+            self.resumed_from_checkpoint_count = count
             logger.info(
                 f"Loaded {count} records and {len(self.completed_searches)} completed searches from checkpoint"
             )
@@ -208,11 +225,9 @@ class LinkedInCollector:
         Execute a single LinkedIn search with bounded backoff and error tracking.
         For remote searches, enhances query with 'remote' to ensure relevant listings.
         """
-        # LinkedIn guest API ignores is_remote query param; enhance query text if remote
         search_term = f"{role} remote" if is_remote else role
         search_location = location
 
-        backoff = INITIAL_BACKOFF_SECONDS
         records: list[dict[str, Any]] = []
 
         for attempt in range(self.max_retries + 1):
@@ -259,16 +274,28 @@ class LinkedInCollector:
                     if status_code == 403 or category == ErrorCategory.HTTP_403_ACCESS_BLOCKED:
                         logger.warning("Permanent access block (403). Aborting retries for this query.")
                         error_record["final_outcome"] = "fatal_blocked_no_retry"
+                        self.circuit_breaker.record_failure(category.value, status_code=403, is_retry=retry_occurred)
                         break
 
-                    # HTTP 429: Rate limited. Apply bounded backoff
+                    # HTTP 429: Rate limited. Apply Retry-After or bounded backoff with jitter
                     if attempt < self.max_retries:
-                        sleep_time = min(backoff + random.uniform(1.0, 5.0), MAX_BACKOFF_SECONDS)
+                        # Extract Retry-After if present in message or error string
+                        retry_after = None
+                        retry_match = re.search(r"retry[-_]after[:\s]+(\d+)", msg, re.IGNORECASE)
+                        if retry_match:
+                            retry_after = float(retry_match.group(1))
+
+                        sleep_time = retry_after if retry_after else calculate_backoff(
+                            attempt + 1,
+                            base_backoff=INITIAL_BACKOFF_SECONDS,
+                            max_backoff=MAX_BACKOFF_SECONDS,
+                        )
                         logger.info(f"Rate limited (429). Backing off for {sleep_time:.1f}s before retry...")
+                        self.circuit_breaker.record_failure(category.value, status_code=429, is_retry=retry_occurred)
                         time.sleep(sleep_time)
-                        backoff *= 2.0
                         continue
                     else:
+                        self.circuit_breaker.record_failure(category.value, status_code=429, is_retry=retry_occurred)
                         break
 
                 if not jobs.empty:
@@ -285,11 +312,13 @@ class LinkedInCollector:
                     if retry_occurred and self.run_errors:
                         self.run_errors[-1]["final_outcome"] = "succeeded_on_retry"
 
+                    self.circuit_breaker.record_success()
                     logger.info(
                         f"Search succeeded: '{role}' in '{location}' (remote={is_remote}) -> {len(records)} records"
                     )
                     break
                 else:
+                    self.circuit_breaker.record_success()
                     logger.info(f"Search returned 0 jobs for '{role}' in '{location}' (remote={is_remote})")
                     break
 
@@ -312,9 +341,10 @@ class LinkedInCollector:
                     "final_outcome": final_outcome,
                 })
                 logger.error(f"Exception during LinkedIn search for '{role}': {e}")
+                self.circuit_breaker.record_failure(category.value, status_code=status_code, is_retry=retry_occurred)
                 if attempt < self.max_retries:
-                    time.sleep(backoff)
-                    backoff *= 2.0
+                    sleep_time = calculate_backoff(attempt + 1, base_backoff=INITIAL_BACKOFF_SECONDS, max_backoff=MAX_BACKOFF_SECONDS)
+                    time.sleep(sleep_time)
                 else:
                     break
 
@@ -327,9 +357,12 @@ class LinkedInCollector:
         self.load_checkpoint()
         target_plan = plan[:limit] if limit else plan
         total = len(target_plan)
-        consecutive_rate_limits = 0
 
         logger.info(f"Starting LinkedIn standalone collection. Planned: {total} searches.")
+
+        searches_completed_count = 0
+        searches_failed_count = 0
+        searches_skipped_count = 0
 
         for idx, item in enumerate(target_plan):
             role = item["role"]
@@ -339,7 +372,15 @@ class LinkedInCollector:
 
             if search_key in self.completed_searches:
                 logger.info(f"[{idx+1}/{total}] Skipping already completed search: {role} | {loc} (remote={is_remote})")
+                searches_skipped_count += 1
                 continue
+
+            if not self.circuit_breaker.can_proceed():
+                logger.warning(
+                    f"Circuit breaker is ACTIVE. Pausing remaining LinkedIn searches to respect platform limits."
+                )
+                self.circuit_breaker_triggered = True
+                break
 
             logger.info(f"[{idx+1}/{total}] Executing search: {role} in {loc} (remote={is_remote})...")
 
@@ -351,19 +392,24 @@ class LinkedInCollector:
             records = self.execute_search_with_backoff(role, loc, is_remote)
             duration = round(time.time() - t0, 2)
 
-            self.completed_searches.add((role, loc, is_remote))
-            self.raw_records.extend(records)
-            self.append_checkpoint(records)
-
-            # Check for rate limiting / failures on this search
             recent_err = [
                 e for e in self.run_errors
-                if e.get("role") == role and e.get("location") == loc and e.get("status_code") in (429, 403)
+                if e.get("role") == role and e.get("location") == loc and e.get("status_code") in (429, 403, 406)
             ]
-            if not records and recent_err:
-                consecutive_rate_limits += 1
+
+            # Critical data integrity: Only mark search completed if clean success
+            if records or not recent_err:
+                self.completed_searches.add((role, loc, is_remote))
+                self.raw_records.extend(records)
+                self.current_run_raw_count += len(records)
+                self.append_checkpoint(records)
+                searches_completed_count += 1
+                search_status = "SUCCESS" if records else "EMPTY_SUCCESS"
             else:
-                consecutive_rate_limits = 0
+                searches_failed_count += 1
+                is_429 = any(e.get("status_code") == 429 for e in recent_err)
+                search_status = "RATE_LIMITED" if is_429 else "FAILED"
+                logger.warning(f"Search for '{role}' in '{loc}' failed ({search_status}); NOT marked completed in checkpoint.")
 
             self.search_stats.append({
                 "role": role,
@@ -371,26 +417,31 @@ class LinkedInCollector:
                 "is_remote": is_remote,
                 "records_returned": len(records),
                 "duration_seconds": duration,
-                "status": "success" if records else "empty_or_failed",
+                "status": search_status,
             })
 
-            # Circuit Breaker: Cooling-off or graceful stop
-            if consecutive_rate_limits >= CIRCUIT_BREAKER_CONSECUTIVE_FAILURES:
+            if self.circuit_breaker.is_open:
                 logger.warning(
-                    f"Circuit breaker triggered: {consecutive_rate_limits} consecutive rate limit / access challenges. Stopping collection gracefully to respect source limits."
+                    f"Circuit breaker tripped during search '{role}'. Stopping collection gracefully."
                 )
                 self.circuit_breaker_triggered = True
                 break
-            elif consecutive_rate_limits == 2:
-                logger.warning(
-                    f"Warning: 2 consecutive challenges. Activating cooldown pause of {CIRCUIT_BREAKER_COOLDOWN_SECONDS}s..."
-                )
-                time.sleep(CIRCUIT_BREAKER_COOLDOWN_SECONDS)
 
         logger.info("Raw collection phase completed. Processing and deduplicating...")
-        return self.process_and_save()
+        return self.process_and_save(
+            searches_planned=total,
+            searches_completed=searches_completed_count,
+            searches_failed=searches_failed_count,
+            searches_skipped=searches_skipped_count,
+        )
 
-    def process_and_save(self) -> list[JobRecord]:
+    def process_and_save(
+        self,
+        searches_planned: int = 0,
+        searches_completed: int = 0,
+        searches_failed: int = 0,
+        searches_skipped: int = 0,
+    ) -> list[JobRecord]:
         """
         Transform raw records into canonical JobRecords, deduplicate, and export.
         """
@@ -437,11 +488,17 @@ class LinkedInCollector:
         run_summary = {
             "run_id": self.run_id,
             "collector": "LinkedInStandaloneCollector",
-            "searches_planned": len(self.completed_searches),
-            "searches_completed": len(self.completed_searches),
-            "raw_records_collected": len(self.raw_records),
+            "searches_planned": searches_planned or len(self.completed_searches),
+            "searches_completed": searches_completed or len(self.completed_searches),
+            "searches_failed": searches_failed,
+            "searches_skipped": searches_skipped,
+            "searches_resumed": len(self.completed_searches) if self.resumed_from_checkpoint_count else 0,
+            "raw_records_collected": self.current_run_raw_count or len(self.raw_records),
+            "raw_records_from_checkpoint": self.resumed_from_checkpoint_count,
+            "raw_records_total": len(self.raw_records),
             "unique_records_preserved": len(unique_records),
             "circuit_breaker_triggered": self.circuit_breaker_triggered,
+            "circuit_breaker_stats": self.circuit_breaker.to_dict(),
             "deduplication": dedup_audit.to_dict(),
             "issues_count": len(self.run_errors),
             "search_stats": self.search_stats,

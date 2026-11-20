@@ -89,8 +89,11 @@ COUNTRY_INDEED = "India"
 # candidates in a separate, targeted stage to control runtime and requests.
 FETCH_DESCRIPTIONS = False
 
+# Centralized rate-limiting & pacing: minimum 10.0s between consecutive requests
+DEFAULT_REQUEST_INTERVAL_SECONDS = 10.0
+
 # A pause helps avoid bursts; it does not bypass or guarantee against blocks.
-DELAY_BETWEEN_SEARCHES_SECONDS = (8, 14)
+DELAY_BETWEEN_SEARCHES_SECONDS = (10, 15)
 
 # LinkedIn is stopped for the remainder of a run after an explicit 429/block.
 STOP_LINKEDIN_AFTER_RATE_LIMIT = True

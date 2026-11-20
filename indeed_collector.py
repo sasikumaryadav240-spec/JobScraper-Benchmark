@@ -28,6 +28,13 @@ from indeed_parser import (
     extract_work_mode,
 )
 from models import FieldOrigin, JobRecord, QualityIndicators, VerificationStatus, WorkMode
+from request_pacer import (
+    CircuitBreaker,
+    calculate_backoff,
+    get_global_pacer,
+    install_request_pacer,
+    parse_retry_after,
+)
 
 
 def load_indeed_checkpoint(path: Path) -> Tuple[List[Dict[str, Any]], Set[Tuple[str, str, bool]]]:
@@ -98,6 +105,11 @@ class IndeedCollector:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.checkpoint_path = checkpoint_path
+
+        self.pacer = install_request_pacer()
+        self.circuit_breaker = CircuitBreaker("indeed", consecutive_failure_threshold=3, cooldown_seconds=60.0)
+        self.resumed_from_checkpoint_count = 0
+        self.current_run_raw_count = 0
 
     def scrape_single_search(
         self,
@@ -320,6 +332,9 @@ class IndeedCollector:
             }
 
         consecutive_blocks = 0
+        searches_completed_count = 0
+        searches_failed_count = 0
+        searches_skipped_count = 0
 
         for index, search in enumerate(target_searches, start=1):
             kw = search["keyword"]
@@ -332,6 +347,7 @@ class IndeedCollector:
 
             if search_key in completed_searches:
                 print("Skipped: already completed in prior checkpoint run.")
+                searches_skipped_count += 1
                 search_stats.append({
                     **search,
                     "records_returned": 0,
@@ -339,13 +355,13 @@ class IndeedCollector:
                 })
                 continue
 
-            if consecutive_blocks >= 3:
-                print("WARNING: Consecutive rate-limits/blocks reached threshold (3). Pausing search loop to protect access.")
+            if not self.circuit_breaker.can_proceed():
+                print("WARNING: Indeed circuit breaker is ACTIVE. Pausing search loop to protect access.")
                 run_errors.append({
                     "run_id": run_id,
                     "timestamp_utc": datetime.now(timezone.utc).isoformat(),
                     "type": "collection_paused_rate_limit",
-                    "details": "Collector paused after 3 consecutive block/rate-limit signals from Indeed.",
+                    "details": "Collector paused after consecutive rate-limit / block signals from Indeed.",
                 })
                 break
 
@@ -357,14 +373,25 @@ class IndeedCollector:
 
             if status == "blocked_or_rate_limited":
                 consecutive_blocks += 1
+                searches_failed_count += 1
+                self.circuit_breaker.record_failure("rate_limited_or_blocked", status_code=429)
+                print(f"Returned: {len(records)} | Status: {status} (NOT added to completed searches) | Elapsed: {elapsed}s")
+            elif status == "failed":
+                searches_failed_count += 1
+                self.circuit_breaker.record_failure("network_or_api_failure")
+                print(f"Returned: {len(records)} | Status: {status} (NOT added to completed searches) | Elapsed: {elapsed}s")
             else:
                 consecutive_blocks = 0
+                searches_completed_count += 1
+                self.circuit_breaker.record_success()
+                completed_searches.add(search_key)
+                print(f"Returned: {len(records)} | Status: {status} | Elapsed: {elapsed}s")
 
             if records:
                 append_indeed_checkpoint(records, self.checkpoint_path)
                 raw_results.extend(records)
+                self.current_run_raw_count += len(records)
 
-            completed_searches.add(search_key)
             search_stats.append({
                 **search,
                 "records_returned": len(records),
@@ -372,7 +399,9 @@ class IndeedCollector:
                 "status": status,
             })
 
-            print(f"Returned: {len(records)} | Status: {status} | Elapsed: {elapsed}s")
+            if self.circuit_breaker.is_open:
+                print("WARNING: Indeed circuit breaker tripped. Stopping further searches.")
+                break
 
             if index < len(target_searches):
                 delay = random.uniform(*self.delay_range)
@@ -460,10 +489,18 @@ class IndeedCollector:
             "duration_seconds": round((run_finished - run_started).total_seconds(), 2),
             "search_combinations_configured": len(target_searches),
             "search_combinations_recorded": len(search_stats),
+            "searches_planned": len(target_searches),
+            "searches_completed": searches_completed_count,
+            "searches_failed": searches_failed_count,
+            "searches_skipped": searches_skipped_count,
+            "searches_resumed": len(completed_searches),
             "raw_records_returned": raw_count,
+            "raw_records_collected": self.current_run_raw_count or raw_count,
+            "raw_records_from_checkpoint": len(raw_results) - self.current_run_raw_count,
             "unique_records_after_dedup": total,
             "duplicates_removed": dup_count,
             "issues_recorded": len(run_errors),
+            "circuit_breaker_stats": self.circuit_breaker.to_dict(),
             "field_coverage_summary": {k: v["coverage_pct"] for k, v in field_stats.items()},
             "work_mode_distribution": work_mode_counts,
             "remote_eligibility_distribution": remote_eligibility_counts,

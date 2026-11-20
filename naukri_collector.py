@@ -43,6 +43,7 @@ Naukri._process_job = _process_job_preserve_snippet
 
 from models import JobRecord
 from naukri_config import (
+    DEFAULT_REQUEST_INTERVAL_SECONDS,
     DELAY_BETWEEN_SEARCHES_SECONDS,
     FETCH_DESCRIPTIONS,
     INITIAL_BACKOFF_SECONDS,
@@ -60,6 +61,13 @@ from naukri_config import (
 )
 from naukri_dedup import deduplicate_naukri_records
 from naukri_parser import DescriptionType, parse_naukri_record
+from request_pacer import (
+    CircuitBreaker,
+    calculate_backoff,
+    get_global_pacer,
+    install_request_pacer,
+    parse_retry_after,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("naukri_collector")
@@ -126,6 +134,16 @@ class NaukriCollector:
         self.raw_records: list[dict[str, Any]] = []
         self.run_errors: list[dict[str, Any]] = []
         self.search_stats: list[dict[str, Any]] = []
+        self.circuit_breaker_triggered = False
+        self.resumed_from_checkpoint_count = 0
+        self.current_run_raw_count = 0
+
+        self.pacer = install_request_pacer()
+        self.circuit_breaker = CircuitBreaker(
+            source_name="naukri",
+            consecutive_failure_threshold=3,
+            cooldown_seconds=45.0,
+        )
 
     def load_checkpoint(self) -> int:
         """
@@ -153,6 +171,7 @@ class NaukriCollector:
                         count += 1
                     except json.JSONDecodeError:
                         continue
+            self.resumed_from_checkpoint_count = count
             logger.info(
                 f"Loaded {count} records and {len(self.completed_searches)} completed searches from checkpoint"
             )
@@ -335,16 +354,28 @@ class NaukriCollector:
         logger.info(f"Starting Naukri collection: {len(search_plan)} planned searches (run_id={self.run_id})")
         self.load_checkpoint()
 
-        consecutive_406_failures = 0
+        total = len(search_plan)
+        searches_completed_count = 0
+        searches_failed_count = 0
+        searches_skipped_count = 0
 
         for idx, query in enumerate(search_plan):
             role = query["role"]
             loc = query["location"]
             is_remote = query["is_remote"]
+            search_key = (role, loc, is_remote)
 
-            if (role, loc, is_remote) in self.completed_searches:
-                logger.info(f"[{idx+1}/{len(search_plan)}] Skipping already completed search: {role} in {loc}")
+            if search_key in self.completed_searches:
+                logger.info(f"[{idx+1}/{total}] Skipping already completed search: {role} in {loc}")
+                searches_skipped_count += 1
                 continue
+
+            if not self.circuit_breaker.can_proceed():
+                logger.warning(
+                    f"Naukri circuit breaker is ACTIVE after consecutive failures. Stopping collection gracefully."
+                )
+                self.circuit_breaker_triggered = True
+                break
 
             # Respectful delay between queries
             if idx > 0:
@@ -355,17 +386,26 @@ class NaukriCollector:
             records = self.execute_search_with_backoff(role, loc, is_remote)
             duration = round(time.time() - t0, 2)
 
-            self.completed_searches.add((role, loc, is_remote))
-            self.raw_records.extend(records)
-            self.append_checkpoint(records)
+            recent_err = [
+                e for e in self.run_errors
+                if e.get("role") == role and e.get("location") == loc and e.get("status_code") in (406, 429, 403)
+            ]
 
-            if not records and any(
-                e.get("role") == role and e.get("location") == loc and e.get("status_code") == 406
-                for e in self.run_errors
-            ):
-                consecutive_406_failures += 1
+            if records or not recent_err:
+                self.completed_searches.add(search_key)
+                self.raw_records.extend(records)
+                self.current_run_raw_count += len(records)
+                self.append_checkpoint(records)
+                self.circuit_breaker.record_success()
+                searches_completed_count += 1
+                search_status = "SUCCESS" if records else "EMPTY_SUCCESS"
             else:
-                consecutive_406_failures = 0
+                searches_failed_count += 1
+                cat = recent_err[0].get("category", "unknown")
+                code = recent_err[0].get("status_code")
+                self.circuit_breaker.record_failure(cat, status_code=code)
+                search_status = "RECAPTCHA_CHALLENGE" if code == 406 else "FAILED"
+                logger.warning(f"Search for '{role}' in '{loc}' failed ({search_status}); NOT marked completed.")
 
             self.search_stats.append({
                 "role": role,
@@ -373,19 +413,29 @@ class NaukriCollector:
                 "is_remote": is_remote,
                 "records_returned": len(records),
                 "duration_seconds": duration,
-                "status": "success" if records else "empty_or_failed",
+                "status": search_status,
             })
 
-            # Circuit breaker: If 3 consecutive searches fail with persistent 406, pause heavily
-            if consecutive_406_failures >= 3:
-                logger.warning("Circuit breaker triggered: 3 consecutive rate limit challenges. Sleeping 45s...")
-                time.sleep(45.0)
-                consecutive_406_failures = 0
+            if self.circuit_breaker.is_open:
+                logger.warning("Circuit breaker tripped: 3 consecutive challenges. Stopping collection gracefully.")
+                self.circuit_breaker_triggered = True
+                break
 
         logger.info("Raw collection complete. Processing and deduplicating...")
-        return self.process_and_save()
+        return self.process_and_save(
+            searches_planned=total,
+            searches_completed=searches_completed_count,
+            searches_failed=searches_failed_count,
+            searches_skipped=searches_skipped_count,
+        )
 
-    def process_and_save(self) -> list[JobRecord]:
+    def process_and_save(
+        self,
+        searches_planned: int = 0,
+        searches_completed: int = 0,
+        searches_failed: int = 0,
+        searches_skipped: int = 0,
+    ) -> list[JobRecord]:
         """
         Transform raw records into canonical JobRecords, deduplicate, and export.
         """
@@ -433,10 +483,17 @@ class NaukriCollector:
         run_summary = {
             "run_id": self.run_id,
             "collector": "NaukriStandaloneCollector",
-            "searches_planned": len(self.completed_searches),
-            "searches_completed": len(self.completed_searches),
-            "raw_records_collected": len(self.raw_records),
+            "searches_planned": searches_planned or len(self.completed_searches),
+            "searches_completed": searches_completed or len(self.completed_searches),
+            "searches_failed": searches_failed,
+            "searches_skipped": searches_skipped,
+            "searches_resumed": len(self.completed_searches) if self.resumed_from_checkpoint_count else 0,
+            "raw_records_collected": self.current_run_raw_count or len(self.raw_records),
+            "raw_records_from_checkpoint": self.resumed_from_checkpoint_count,
+            "raw_records_total": len(self.raw_records),
             "unique_records_preserved": len(unique_records),
+            "circuit_breaker_triggered": self.circuit_breaker_triggered,
+            "circuit_breaker_stats": self.circuit_breaker.to_dict(),
             "deduplication": dedup_audit.to_dict(),
             "issues_count": len(self.run_errors),
             "search_stats": self.search_stats,

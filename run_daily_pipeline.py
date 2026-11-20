@@ -29,6 +29,7 @@ from ats_collector import ATSCollector
 from indeed_collector import IndeedCollector
 from linkedin_collector import LinkedInCollector
 from naukri_collector import NaukriCollector
+from request_pacer import get_global_pacer, install_request_pacer
 from unified_pipeline import UnifiedPipeline
 
 logging.basicConfig(
@@ -48,6 +49,7 @@ class DailyPipelineOrchestrator:
         self.start_time = datetime.now(timezone.utc)
         self.source_telemetry: dict[str, dict[str, Any]] = {}
         self.run_errors: list[dict[str, Any]] = []
+        self.pacer = install_request_pacer()
 
     def _check_source_freshness(self, file_path: Path, collected_in_run: bool) -> tuple[str, str]:
         """Return (freshness_status, timestamp_iso)."""
@@ -73,6 +75,11 @@ class DailyPipelineOrchestrator:
         unique_count = 0
         duplicates_removed = 0
         err_msg = None
+        planned = 0
+        completed = 0
+        failed = 0
+        skipped = 0
+        cb_stats: dict[str, Any] = {}
 
         try:
             collector = IndeedCollector(checkpoint_path=self.base_dir / "indeed_checkpoint.jsonl")
@@ -85,14 +92,25 @@ class DailyPipelineOrchestrator:
                 searches = cfg.generate_search_plan(roles=rep_roles, locations=rep_locations, include_remote=True)
 
             res = collector.run(searches=searches, clean=False)
-            # Correct return dictionary parsing from IndeedCollector.run
             raw_count = res.get("raw_records_returned", 0)
             unique_count = res.get("unique_records_after_dedup", 0)
             duplicates_removed = res.get("duplicates_removed", 0)
             issues_recorded = res.get("issues_recorded", 0)
+            planned = res.get("searches_planned", len(searches))
+            completed = res.get("searches_completed", 0)
+            failed = res.get("searches_failed", 0)
+            skipped = res.get("searches_skipped", 0)
+            cb_stats = res.get("circuit_breaker_stats", {})
 
             collected_in_run = True
-            if unique_count > 0:
+            if failed > 0 or cb_stats.get("is_open"):
+                if unique_count > 0:
+                    status = "PARTIAL"
+                    err_msg = f"{completed}/{planned} searches completed, {failed} failed/rate-limited"
+                else:
+                    status = "FAILED"
+                    err_msg = f"All {planned} searches failed or blocked"
+            elif unique_count > 0:
                 status = "PARTIAL" if issues_recorded > 0 else "SUCCESS"
             else:
                 status = "FAILED" if issues_recorded > 0 else "EMPTY_SUCCESS"
@@ -116,6 +134,14 @@ class DailyPipelineOrchestrator:
             "records_count": unique_count,
             "raw_records_count": raw_count,
             "duplicates_removed": duplicates_removed,
+            "planned": planned,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_403_406_count": cb_stats.get("http_403_406_count", 0),
+            "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
+            "circuit_breaker_open": cb_stats.get("is_open", False),
             "last_collection_time": timestamp,
             "error": err_msg,
         }
@@ -130,6 +156,11 @@ class DailyPipelineOrchestrator:
         rec_count = 0
         raw_count = 0
         err_msg = None
+        planned = 0
+        completed = 0
+        failed = 0
+        skipped = 0
+        cb_stats: dict[str, Any] = {}
 
         try:
             collector = NaukriCollector(checkpoint_path=self.base_dir / "naukri_checkpoint.jsonl")
@@ -141,16 +172,38 @@ class DailyPipelineOrchestrator:
                 rep_locations = ["Bengaluru", "Hyderabad"]
                 plan = cfg.build_search_plan(roles=rep_roles, cities=rep_locations, include_remote=True)
 
-            # Invoke collector with supported method signature: run(plan=plan)
             res = collector.run(plan=plan)
             rec_count = len(res)
-            raw_count = len(collector.raw_records)
+            raw_count = len(getattr(collector, "raw_records", []))
             collected_in_run = True
 
-            has_errors = bool(collector.run_errors)
-            has_406 = any(e.get("status_code") == 406 or "406" in str(e) for e in collector.run_errors)
+            summary_file = self.base_dir / "naukri_run_summary.json"
+            sdata: dict[str, Any] = {}
+            if summary_file.exists():
+                try:
+                    with open(summary_file, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                except Exception:
+                    pass
 
-            if rec_count > 0:
+            planned = sdata.get("searches_planned", len(plan))
+            completed = sdata.get("searches_completed", len(getattr(collector, "completed_searches", [])))
+            failed = sdata.get("searches_failed", 0)
+            skipped = sdata.get("searches_skipped", 0)
+            cb_stats = sdata.get("circuit_breaker_stats", {})
+
+            col_errors = getattr(collector, "run_errors", [])
+            has_errors = bool(col_errors)
+            has_406 = any(e.get("status_code") == 406 or "406" in str(e) for e in col_errors)
+
+            if failed > 0 or cb_stats.get("is_open"):
+                if rec_count > 0:
+                    status = "PARTIAL"
+                    err_msg = f"{completed}/{planned} searches completed, {failed} failed (reCAPTCHA: {cb_stats.get('http_403_406_count', 0)})"
+                else:
+                    status = "FAILED"
+                    err_msg = "HTTP 406 reCAPTCHA challenge triggered / circuit breaker tripped"
+            elif rec_count > 0:
                 status = "PARTIAL" if has_errors else "SUCCESS"
             else:
                 if has_406:
@@ -158,7 +211,7 @@ class DailyPipelineOrchestrator:
                     err_msg = "HTTP 406 reCAPTCHA challenge triggered / circuit breaker tripped"
                 elif has_errors:
                     status = "FAILED"
-                    err_msg = str(collector.run_errors[-1].get("error_message") or "Collection errors occurred")
+                    err_msg = str(col_errors[-1].get("error_message") or "Collection errors occurred") if col_errors else "Collection errors occurred"
                 else:
                     status = "EMPTY_SUCCESS"
 
@@ -177,6 +230,14 @@ class DailyPipelineOrchestrator:
             "duration_seconds": duration,
             "records_count": rec_count,
             "raw_records_count": raw_count,
+            "planned": planned,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_403_406_count": cb_stats.get("http_403_406_count", 0),
+            "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
+            "circuit_breaker_open": cb_stats.get("is_open", False),
             "last_collection_time": timestamp,
             "error": err_msg,
         }
@@ -191,6 +252,11 @@ class DailyPipelineOrchestrator:
         rec_count = 0
         raw_count = 0
         err_msg = None
+        planned = 0
+        completed = 0
+        failed = 0
+        skipped = 0
+        cb_stats: dict[str, Any] = {}
 
         try:
             collector = LinkedInCollector(checkpoint_path=self.base_dir / "linkedin_checkpoint.jsonl")
@@ -202,26 +268,42 @@ class DailyPipelineOrchestrator:
                 rep_locations = ["Bengaluru", "Hyderabad"]
                 plan = cfg.build_search_plan(roles=rep_roles, cities=rep_locations, include_remote=True)
 
-            # Invoke collector with supported method signature: run(plan=plan)
             res = collector.run(plan=plan)
             rec_count = len(res)
-            raw_count = len(collector.raw_records)
+            raw_count = len(getattr(collector, "raw_records", []))
             collected_in_run = True
 
-            has_errors = bool(collector.run_errors)
-            has_429 = any(e.get("status_code") == 429 or "429" in str(e) for e in collector.run_errors)
+            summary_file = self.base_dir / "linkedin_run_summary.json"
+            sdata: dict[str, Any] = {}
+            if summary_file.exists():
+                try:
+                    with open(summary_file, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                except Exception:
+                    pass
 
-            if rec_count > 0:
-                status = "PARTIAL" if has_errors or has_429 else "SUCCESS"
-            else:
-                if has_429:
-                    status = "RATE_LIMITED"
-                    err_msg = "HTTP 429 Rate Limited by LinkedIn"
-                elif has_errors:
-                    status = "FAILED"
-                    err_msg = str(collector.run_errors[-1].get("error_message") or "Collection errors occurred")
+            planned = sdata.get("searches_planned", len(plan))
+            completed = sdata.get("searches_completed", len(getattr(collector, "completed_searches", [])))
+            failed = sdata.get("searches_failed", 0)
+            skipped = sdata.get("searches_skipped", 0)
+            cb_stats = sdata.get("circuit_breaker_stats", {})
+
+            col_errors = getattr(collector, "run_errors", [])
+            has_errors = bool(col_errors)
+            has_429 = any(e.get("status_code") == 429 or "429" in str(e) for e in col_errors)
+            cb_open = cb_stats.get("is_open") or getattr(collector, "circuit_breaker_triggered", False)
+
+            if failed > 0 or cb_open or has_429:
+                if rec_count > 0:
+                    status = "PARTIAL"
+                    err_msg = f"{completed}/{planned} searches completed, {failed} failed/rate-limited (HTTP 429: {cb_stats.get('http_429_count', 0)}, circuit breaker: {'TRIPPED' if cb_open else 'ACTIVE'})"
                 else:
-                    status = "EMPTY_SUCCESS"
+                    status = "RATE_LIMITED" if has_429 else "FAILED"
+                    err_msg = f"HTTP 429 Rate Limited by LinkedIn ({cb_stats.get('http_429_count', 0)} blocks, circuit breaker tripped)"
+            elif rec_count > 0:
+                status = "PARTIAL" if has_errors else "SUCCESS"
+            else:
+                status = "EMPTY_SUCCESS"
 
             logger.info(f"LinkedIn collection completed: {rec_count} unique records (raw={raw_count}, status={status}).")
         except Exception as e:
@@ -238,6 +320,14 @@ class DailyPipelineOrchestrator:
             "duration_seconds": duration,
             "records_count": rec_count,
             "raw_records_count": raw_count,
+            "planned": planned,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_403_406_count": cb_stats.get("http_403_406_count", 0),
+            "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
+            "circuit_breaker_open": cb_stats.get("is_open", False),
             "last_collection_time": timestamp,
             "error": err_msg,
         }
@@ -252,16 +342,44 @@ class DailyPipelineOrchestrator:
         rec_count = 0
         raw_count = 0
         err_msg = None
+        planned = 0
+        completed = 0
+        failed = 0
+        skipped = 0
+        cb_stats: dict[str, Any] = {}
 
         try:
             collector = ATSCollector()
             res = collector.run()
             rec_count = len(res)
-            raw_count = len(collector.raw_records)
+            raw_count = len(getattr(collector, "raw_records", []))
             collected_in_run = True
 
-            has_errors = bool(collector.run_errors)
-            if rec_count > 0:
+            summary_file = self.base_dir / "ats_run_summary.json"
+            sdata: dict[str, Any] = {}
+            if summary_file.exists():
+                try:
+                    with open(summary_file, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                except Exception:
+                    pass
+
+            planned = sdata.get("boards_planned", 15)
+            completed = sdata.get("boards_completed", len(getattr(collector, "completed_boards", [])))
+            failed = sdata.get("boards_failed", 0)
+            skipped = sdata.get("boards_skipped", 0)
+            cb_stats = sdata.get("circuit_breaker_stats", {})
+
+            col_errors = getattr(collector, "run_errors", [])
+            has_errors = bool(col_errors)
+            if failed > 0:
+                if rec_count > 0:
+                    status = "PARTIAL"
+                    err_msg = f"{completed}/{planned} employer boards completed, {failed} failed"
+                else:
+                    status = "FAILED"
+                    err_msg = f"All {planned} employer boards failed"
+            elif rec_count > 0:
                 status = "PARTIAL" if has_errors else "SUCCESS"
             else:
                 status = "FAILED" if has_errors else "EMPTY_SUCCESS"
@@ -281,6 +399,14 @@ class DailyPipelineOrchestrator:
             "duration_seconds": duration,
             "records_count": rec_count,
             "raw_records_count": raw_count,
+            "planned": planned,
+            "completed": completed,
+            "failed": failed,
+            "skipped": skipped,
+            "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_403_406_count": cb_stats.get("http_403_406_count", 0),
+            "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
+            "circuit_breaker_open": cb_stats.get("is_open", False),
             "last_collection_time": timestamp,
             "error": err_msg,
         }
@@ -404,8 +530,8 @@ class DailyPipelineOrchestrator:
         lines.append(f"**Run ID**: `{summary['run_id']}` | **Status**: **{status_banner}** | **Duration**: `{summary['total_duration_seconds']}s`\n")
 
         lines.append("## 1. Source Collection Status")
-        lines.append("| Source | Status | Data Freshness | Unique Records | Raw Records | Duration | Details |")
-        lines.append("|---|---|---|---|---|---|---|")
+        lines.append("| Source | Status | Data Freshness | Planned | Completed | Failed | Skipped | Unique Records | Raw Records | 429s | 403/406 | Duration | Details |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for src, t in summary["source_telemetry"].items():
             st = t["status"]
             if st == "SUCCESS":
@@ -433,10 +559,16 @@ class DailyPipelineOrchestrator:
 
             raw_c = t.get("raw_records_count", t.get("records_count", 0))
             unique_c = t.get("records_count", 0)
+            planned_c = t.get("planned", "-")
+            completed_c = t.get("completed", "-")
+            failed_c = t.get("failed", 0)
+            skipped_c = t.get("skipped", 0)
+            c_429 = t.get("http_429_count", 0)
+            c_403 = t.get("http_403_406_count", 0)
             err_text = t.get("error") or "OK"
 
             lines.append(
-                f"| **{src.upper()}** | {status_badge} | {fresh_badge} | **{unique_c}** | {raw_c} | {t['duration_seconds']}s | {err_text} |"
+                f"| **{src.upper()}** | {status_badge} | {fresh_badge} | {planned_c} | {completed_c} | {failed_c} | {skipped_c} | **{unique_c}** | {raw_c} | {c_429} | {c_403} | {t['duration_seconds']}s | {err_text} |"
             )
 
         breakdown = summary.get("source_status_breakdown", {})

@@ -58,15 +58,16 @@ REMOTE_LOCATION = "India"
 RESULTS_PER_SEARCH = 15  # Sustainable batch size to prevent rate limits
 POSTED_WITHIN_HOURS = 72  # 3-day posting window
 FETCH_DESCRIPTIONS = True  # Retrieve full JDs with polite inter-detail delays
-DELAY_BETWEEN_SEARCHES_SECONDS = (6.0, 10.0)  # Pacing between searches
-DELAY_BETWEEN_DETAILS_SECONDS = (1.2, 2.2)  # Polite pacing between individual job detail requests
+DEFAULT_REQUEST_INTERVAL_SECONDS = 10.0
+DELAY_BETWEEN_SEARCHES_SECONDS = (10.0, 15.0)  # Pacing between searches
+DELAY_BETWEEN_DETAILS_SECONDS = (10.0, 12.0)  # Centralized minimum 10s pacing between individual job detail requests
 
 # Rate limiting, backoff, and circuit breaker
 MAX_RETRIES = 2
-INITIAL_BACKOFF_SECONDS = 15.0
-MAX_BACKOFF_SECONDS = 45.0
+INITIAL_BACKOFF_SECONDS = 30.0
+MAX_BACKOFF_SECONDS = 120.0
 CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 3
-CIRCUIT_BREAKER_COOLDOWN_SECONDS = 45.0
+CIRCUIT_BREAKER_COOLDOWN_SECONDS = 60.0
 
 def build_search_plan(
     roles: list[str] | None = None,

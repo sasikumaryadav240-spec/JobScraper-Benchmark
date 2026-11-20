@@ -42,6 +42,13 @@ from ats_dedup import deduplicate_ats_records
 from ats_registry import EmployerBoard, get_verified_registry
 from linkedin_parser import DescriptionType
 from models import JobRecord
+from request_pacer import (
+    CircuitBreaker,
+    calculate_backoff,
+    get_global_pacer,
+    install_request_pacer,
+    parse_retry_after,
+)
 
 logger = logging.getLogger("ATSCollector")
 if not logger.handlers:
@@ -86,6 +93,11 @@ class ATSCollector:
         self.raw_records: list[dict[str, Any]] = []
         self.run_errors: list[dict[str, Any]] = []
         self.board_stats: list[dict[str, Any]] = []
+        self.resumed_from_checkpoint_count = 0
+        self.current_run_raw_count = 0
+
+        self.pacer = install_request_pacer()
+        self.circuit_breaker = CircuitBreaker("ats", consecutive_failure_threshold=5, cooldown_seconds=60.0)
 
     def load_checkpoint(self) -> int:
         """Load completed boards and raw records from checkpoint."""
@@ -108,6 +120,7 @@ class ATSCollector:
                         count += 1
                     except json.JSONDecodeError:
                         continue
+            self.resumed_from_checkpoint_count = count
             logger.info(f"Loaded {count} records across {len(self.completed_boards)} boards from checkpoint")
         except Exception as e:
             logger.warning(f"Error reading checkpoint: {e}")
@@ -127,16 +140,18 @@ class ATSCollector:
         if not adapter:
             raise ValueError(f"Unsupported ATS platform: {board.ats_platform}")
 
-        backoff = INITIAL_BACKOFF_SECONDS
         raw_items: list[dict[str, Any]] = []
 
         for attempt in range(MAX_RETRIES + 1):
+            retry_occurred = attempt > 0
             try:
                 raw_items = adapter.fetch_raw_board(board)
                 logger.info(f"Successfully fetched {board.company_name} ({board.ats_platform}:{board.board_identifier}) -> {len(raw_items)} listings")
+                self.circuit_breaker.record_success()
                 break
             except Exception as e:
-                status_code = getattr(getattr(e, "response", None), "status_code", None)
+                response = getattr(e, "response", None)
+                status_code = getattr(response, "status_code", None)
                 err_msg = str(e)
                 final_outcome = "exhausted_retries" if attempt == MAX_RETRIES else "retrying"
 
@@ -152,6 +167,7 @@ class ATSCollector:
                     "final_outcome": final_outcome,
                 }
                 self.run_errors.append(err_entry)
+                self.circuit_breaker.record_failure(board.ats_platform, status_code=status_code, is_retry=retry_occurred)
                 logger.warning(f"Error fetching {board.company_name} ({board.ats_platform}): {err_msg} (attempt {attempt+1}/{MAX_RETRIES+1})")
 
                 if status_code in (404, 403):
@@ -160,9 +176,16 @@ class ATSCollector:
                     break
 
                 if attempt < MAX_RETRIES:
-                    sleep_time = min(backoff + random.uniform(1.0, 3.0), MAX_BACKOFF_SECONDS)
+                    retry_after = None
+                    if response is not None:
+                        retry_after = parse_retry_after(response.headers.get("Retry-After"))
+
+                    sleep_time = retry_after if retry_after else calculate_backoff(
+                        attempt + 1,
+                        base_backoff=INITIAL_BACKOFF_SECONDS,
+                        max_backoff=MAX_BACKOFF_SECONDS,
+                    )
                     time.sleep(sleep_time)
-                    backoff *= 2.0
                 else:
                     break
 
@@ -177,11 +200,20 @@ class ATSCollector:
         total = len(target_boards)
         logger.info(f"Starting ATS collection across {total} verified employer boards...")
 
+        boards_completed_count = 0
+        boards_failed_count = 0
+        boards_skipped_count = 0
+
         for idx, board in enumerate(target_boards, 1):
             board_key = (board.ats_platform, board.board_identifier)
             if board_key in self.completed_boards:
                 logger.info(f"[{idx}/{total}] Skipping already completed board: {board.company_name} ({board.ats_platform})")
+                boards_skipped_count += 1
                 continue
+
+            if not self.circuit_breaker.can_proceed():
+                logger.warning("ATS circuit breaker is ACTIVE after persistent failures. Halting board processing.")
+                break
 
             logger.info(f"[{idx}/{total}] Processing board: {board.company_name} ({board.ats_platform}:{board.board_identifier})...")
 
@@ -193,18 +225,30 @@ class ATSCollector:
             raw_listings = self.fetch_board_with_backoff(board)
             duration = round(time.time() - t0, 2)
 
-            # Store board identifier in raw records for checkpointing
-            board_records_for_chk = []
-            for item in raw_listings:
-                item_copy = dict(item) if isinstance(item, dict) else {"raw": item}
-                item_copy["ats_platform"] = board.ats_platform
-                item_copy["board_identifier"] = board.board_identifier
-                item_copy["company_name"] = board.company_name
-                board_records_for_chk.append(item_copy)
+            recent_board_err = [
+                e for e in self.run_errors
+                if e.get("board_identifier") == board.board_identifier and e.get("final_outcome") in ("fatal_non_retryable", "exhausted_retries")
+            ]
 
-            self.completed_boards.add(board_key)
-            self.raw_records.extend(board_records_for_chk)
-            self.append_checkpoint(board_records_for_chk)
+            if raw_listings or not recent_board_err:
+                board_records_for_chk = []
+                for item in raw_listings:
+                    item_copy = dict(item) if isinstance(item, dict) else {"raw": item}
+                    item_copy["ats_platform"] = board.ats_platform
+                    item_copy["board_identifier"] = board.board_identifier
+                    item_copy["company_name"] = board.company_name
+                    board_records_for_chk.append(item_copy)
+
+                self.completed_boards.add(board_key)
+                self.raw_records.extend(board_records_for_chk)
+                self.current_run_raw_count += len(board_records_for_chk)
+                self.append_checkpoint(board_records_for_chk)
+                boards_completed_count += 1
+                b_status = "SUCCESS" if raw_listings else "EMPTY_SUCCESS"
+            else:
+                boards_failed_count += 1
+                b_status = "FAILED"
+                logger.warning(f"Board {board.company_name} failed; NOT marked completed.")
 
             self.board_stats.append({
                 "company_name": board.company_name,
@@ -212,13 +256,24 @@ class ATSCollector:
                 "board_identifier": board.board_identifier,
                 "total_listings_fetched": len(raw_listings),
                 "duration_seconds": duration,
-                "status": "success" if raw_listings else "empty_or_failed",
+                "status": b_status,
             })
 
         logger.info("Raw ATS collection phase finished. Parsing and deduplicating cybersecurity roles...")
-        return self.process_and_save()
+        return self.process_and_save(
+            boards_planned=total,
+            boards_completed=boards_completed_count,
+            boards_failed=boards_failed_count,
+            boards_skipped=boards_skipped_count,
+        )
 
-    def process_and_save(self) -> list[JobRecord]:
+    def process_and_save(
+        self,
+        boards_planned: int = 0,
+        boards_completed: int = 0,
+        boards_failed: int = 0,
+        boards_skipped: int = 0,
+    ) -> list[JobRecord]:
         """
         Transform raw listings into canonical cybersecurity JobRecords, deduplicate, and export.
         """
@@ -301,11 +356,18 @@ class ATSCollector:
         run_summary = {
             "run_id": self.run_id,
             "collector": "ATSStandaloneCollector",
-            "boards_configured": len(get_verified_registry(active_only=True)),
-            "boards_completed": len(self.completed_boards),
+            "boards_configured": boards_planned or len(get_verified_registry(active_only=True)),
+            "boards_planned": boards_planned or len(get_verified_registry(active_only=True)),
+            "boards_completed": boards_completed or len(self.completed_boards),
+            "boards_failed": boards_failed,
+            "boards_skipped": boards_skipped,
+            "boards_resumed": len(self.completed_boards) if self.resumed_from_checkpoint_count else 0,
+            "raw_listings_fetched_current_run": self.current_run_raw_count or len(self.raw_records),
+            "raw_listings_from_checkpoint": self.resumed_from_checkpoint_count,
             "raw_listings_fetched_total": len(self.raw_records),
             "cybersecurity_jobs_filtered": len(canonical_jobs),
             "unique_jobs_preserved": len(unique_jobs),
+            "circuit_breaker_stats": self.circuit_breaker.to_dict(),
             "platform_breakdown": {
                 "greenhouse": len(gh_jobs),
                 "lever": len(lever_jobs),
