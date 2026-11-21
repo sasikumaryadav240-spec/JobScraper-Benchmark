@@ -79,6 +79,8 @@ class DailyPipelineOrchestrator:
         completed = 0
         failed = 0
         skipped = 0
+        cnt_429 = 0
+        cnt_5xx = 0
         cb_stats: dict[str, Any] = {}
 
         try:
@@ -139,6 +141,7 @@ class DailyPipelineOrchestrator:
             "failed": failed,
             "skipped": skipped,
             "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_5xx_count": cb_stats.get("http_5xx_count", 0),
             "http_403_406_count": cb_stats.get("http_403_406_count", 0),
             "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
             "circuit_breaker_open": cb_stats.get("is_open", False),
@@ -160,6 +163,8 @@ class DailyPipelineOrchestrator:
         completed = 0
         failed = 0
         skipped = 0
+        cnt_429 = 0
+        cnt_5xx = 0
         cb_stats: dict[str, Any] = {}
 
         try:
@@ -235,6 +240,7 @@ class DailyPipelineOrchestrator:
             "failed": failed,
             "skipped": skipped,
             "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_5xx_count": cb_stats.get("http_5xx_count", 0),
             "http_403_406_count": cb_stats.get("http_403_406_count", 0),
             "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
             "circuit_breaker_open": cb_stats.get("is_open", False),
@@ -256,6 +262,8 @@ class DailyPipelineOrchestrator:
         completed = 0
         failed = 0
         skipped = 0
+        cnt_429 = 0
+        cnt_5xx = 0
         cb_stats: dict[str, Any] = {}
 
         try:
@@ -291,15 +299,19 @@ class DailyPipelineOrchestrator:
             col_errors = getattr(collector, "run_errors", [])
             has_errors = bool(col_errors)
             has_429 = any(e.get("status_code") == 429 or "429" in str(e) for e in col_errors)
+            has_5xx = any(e.get("status_code") and e.get("status_code") >= 500 for e in col_errors)
             cb_open = cb_stats.get("is_open") or getattr(collector, "circuit_breaker_triggered", False)
 
-            if failed > 0 or cb_open or has_429:
+            cnt_429 = cb_stats.get("http_429_count", sum(1 for e in col_errors if e.get("status_code") == 429))
+            cnt_5xx = cb_stats.get("http_5xx_count", sum(1 for e in col_errors if e.get("status_code") and e.get("status_code") >= 500))
+
+            if failed > 0 or cb_open or has_429 or has_5xx:
                 if rec_count > 0:
                     status = "PARTIAL"
-                    err_msg = f"{completed}/{planned} searches completed, {failed} failed/rate-limited (HTTP 429: {cb_stats.get('http_429_count', 0)}, circuit breaker: {'TRIPPED' if cb_open else 'ACTIVE'})"
+                    err_msg = f"{completed}/{planned} searches completed, {failed} failed (HTTP 429: {cnt_429}, HTTP 5xx: {cnt_5xx}, circuit breaker: {'TRIPPED' if cb_open else 'ACTIVE'})"
                 else:
                     status = "RATE_LIMITED" if has_429 else "FAILED"
-                    err_msg = f"HTTP 429 Rate Limited by LinkedIn ({cb_stats.get('http_429_count', 0)} blocks, circuit breaker tripped)"
+                    err_msg = f"LinkedIn collection failed (HTTP 429: {cnt_429}, HTTP 5xx: {cnt_5xx}, circuit breaker tripped)"
             elif rec_count > 0:
                 status = "PARTIAL" if has_errors else "SUCCESS"
             else:
@@ -310,7 +322,13 @@ class DailyPipelineOrchestrator:
             err_msg = str(e)
             logger.error(f"LinkedIn stage encountered an error: {e}", exc_info=True)
             self.run_errors.append({"source": source_name, "error": err_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
-            status = "RATE_LIMITED" if "429" in str(e) else "FAILED"
+            if "429" in str(e):
+                status = "RATE_LIMITED"
+                cnt_429 = max(cnt_429, 1)
+            else:
+                status = "FAILED"
+            if "500" in str(e) or "502" in str(e) or "503" in str(e):
+                cnt_5xx = max(cnt_5xx, 1)
 
         duration = round(time.time() - t0, 2)
         freshness, timestamp = self._check_source_freshness(self.base_dir / "linkedin_jobs.json", collected_in_run)
@@ -324,7 +342,8 @@ class DailyPipelineOrchestrator:
             "completed": completed,
             "failed": failed,
             "skipped": skipped,
-            "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_429_count": cnt_429,
+            "http_5xx_count": cnt_5xx,
             "http_403_406_count": cb_stats.get("http_403_406_count", 0),
             "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
             "circuit_breaker_open": cb_stats.get("is_open", False),
@@ -346,6 +365,8 @@ class DailyPipelineOrchestrator:
         completed = 0
         failed = 0
         skipped = 0
+        cnt_429 = 0
+        cnt_5xx = 0
         cb_stats: dict[str, Any] = {}
 
         try:
@@ -404,6 +425,7 @@ class DailyPipelineOrchestrator:
             "failed": failed,
             "skipped": skipped,
             "http_429_count": cb_stats.get("http_429_count", 0),
+            "http_5xx_count": cb_stats.get("http_5xx_count", 0),
             "http_403_406_count": cb_stats.get("http_403_406_count", 0),
             "circuit_breaker_events": cb_stats.get("circuit_breaker_events", 0),
             "circuit_breaker_open": cb_stats.get("is_open", False),
@@ -442,6 +464,13 @@ class DailyPipelineOrchestrator:
                     "duration_seconds": 0.0,
                     "records_count": count,
                     "raw_records_count": count,
+                    "planned": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "http_429_count": 0,
+                    "http_5xx_count": 0,
+                    "http_403_406_count": 0,
                     "last_collection_time": timestamp,
                     "error": None,
                 }
@@ -530,8 +559,8 @@ class DailyPipelineOrchestrator:
         lines.append(f"**Run ID**: `{summary['run_id']}` | **Status**: **{status_banner}** | **Duration**: `{summary['total_duration_seconds']}s`\n")
 
         lines.append("## 1. Source Collection Status")
-        lines.append("| Source | Status | Data Freshness | Planned | Completed | Failed | Skipped | Unique Records | Raw Records | 429s | 403/406 | Duration | Details |")
-        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("| Source | Status | Data Freshness | Planned | Completed | Failed | Skipped | Unique Records | Raw Records | 429s | 5xx | 403/406 | Duration | Details |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for src, t in summary["source_telemetry"].items():
             st = t["status"]
             if st == "SUCCESS":
@@ -547,7 +576,7 @@ class DailyPipelineOrchestrator:
             else:
                 status_badge = f"❌ {st}"
 
-            fresh = t["freshness"]
+            fresh = t.get("freshness", t.get("data_freshness", "UNKNOWN"))
             if fresh == "FRESH":
                 fresh_badge = "🟢 FRESH"
             elif fresh == "CACHED_RECENT":
@@ -564,20 +593,28 @@ class DailyPipelineOrchestrator:
             failed_c = t.get("failed", 0)
             skipped_c = t.get("skipped", 0)
             c_429 = t.get("http_429_count", 0)
+            c_5xx = t.get("http_5xx_count", 0)
             c_403 = t.get("http_403_406_count", 0)
             err_text = t.get("error") or "OK"
 
             lines.append(
-                f"| **{src.upper()}** | {status_badge} | {fresh_badge} | {planned_c} | {completed_c} | {failed_c} | {skipped_c} | **{unique_c}** | {raw_c} | {c_429} | {c_403} | {t['duration_seconds']}s | {err_text} |"
+                f"| **{src.upper()}** | {status_badge} | {fresh_badge} | {planned_c} | {completed_c} | {failed_c} | {skipped_c} | **{unique_c}** | {raw_c} | {c_429} | {c_5xx} | {c_403} | {t['duration_seconds']}s | {err_text} |"
             )
 
         breakdown = summary.get("source_status_breakdown", {})
         lines.append("\n### Source Integrity Breakdown:")
         lines.append(f"- **Complete Collection Achieved**: `{'YES' if breakdown.get('complete_collection_achieved') else 'NO (Partial Run)'}`")
-        if breakdown.get("failed"):
-            lines.append(f"- **❌ Failed Sources**: {', '.join(s.upper() for s in breakdown['failed'])}")
+        if breakdown.get("succeeded"):
+            lines.append(f"- **✅ Fully Completed Sources**: {', '.join(s.upper() for s in breakdown['succeeded'])}")
         if breakdown.get("partial"):
-            lines.append(f"- **⚠️ Partial / Rate-Limited Sources**: {', '.join(s.upper() for s in breakdown['partial'])}")
+            partial_with_records = [s.upper() for s in breakdown["partial"] if summary["source_telemetry"].get(s, {}).get("records_count", 0) > 0]
+            if partial_with_records:
+                lines.append(f"- **⚠️ Partial Sources (Retaining Usable Records)**: {', '.join(partial_with_records)}")
+            rl_sources = [s.upper() for s in breakdown["partial"] if summary["source_telemetry"].get(s, {}).get("status") == "RATE_LIMITED" or summary["source_telemetry"].get(s, {}).get("http_429_count", 0) > 0]
+            if rl_sources:
+                lines.append(f"- **⏳ Rate-Limited Sources**: {', '.join(rl_sources)}")
+        if breakdown.get("failed"):
+            lines.append(f"- **❌ Failed Sources (No Usable Records)**: {', '.join(s.upper() for s in breakdown['failed'])}")
         if breakdown.get("cached_ingested"):
             lines.append(f"- **🟡 Sources Using Cached/Historical Data**: {', '.join(s.upper() for s in breakdown['cached_ingested'])}")
 

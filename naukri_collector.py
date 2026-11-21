@@ -488,7 +488,7 @@ class NaukriCollector:
             "searches_failed": searches_failed,
             "searches_skipped": searches_skipped,
             "searches_resumed": len(self.completed_searches) if self.resumed_from_checkpoint_count else 0,
-            "raw_records_collected": self.current_run_raw_count or len(self.raw_records),
+            "raw_records_collected": self.current_run_raw_count,
             "raw_records_from_checkpoint": self.resumed_from_checkpoint_count,
             "raw_records_total": len(self.raw_records),
             "unique_records_preserved": len(unique_records),

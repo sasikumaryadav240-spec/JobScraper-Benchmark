@@ -136,6 +136,7 @@ class LinkedInCollector:
         self.max_retries = max_retries
 
         self.completed_searches: set[tuple[str, str, bool]] = set()
+        self.initial_completed_searches: set[tuple[str, str, bool]] = set()
         self.raw_records: list[dict[str, Any]] = []
         self.run_errors: list[dict[str, Any]] = []
         self.search_stats: list[dict[str, Any]] = []
@@ -198,6 +199,7 @@ class LinkedInCollector:
                     except json.JSONDecodeError:
                         continue
             self.resumed_from_checkpoint_count = count
+            self.initial_completed_searches = set(self.completed_searches)
             logger.info(
                 f"Loaded {count} records and {len(self.completed_searches)} completed searches from checkpoint"
             )
@@ -278,25 +280,57 @@ class LinkedInCollector:
                         break
 
                     # HTTP 429: Rate limited. Apply Retry-After or bounded backoff with jitter
-                    if attempt < self.max_retries:
-                        # Extract Retry-After if present in message or error string
-                        retry_after = None
-                        retry_match = re.search(r"retry[-_]after[:\s]+(\d+)", msg, re.IGNORECASE)
-                        if retry_match:
-                            retry_after = float(retry_match.group(1))
+                    elif status_code == 429 or category == ErrorCategory.HTTP_429_RATE_LIMITED:
+                        self.circuit_breaker.record_failure(category.value, status_code=429, is_retry=retry_occurred)
+                        if attempt < self.max_retries:
+                            # Extract Retry-After from pacer or error message
+                            retry_after = self.pacer.get_retry_after("linkedin.com")
+                            if not retry_after:
+                                retry_match = re.search(r"retry[-_]after[:\s]+(\d+)", msg, re.IGNORECASE)
+                                if retry_match:
+                                    retry_after = float(retry_match.group(1))
 
-                        sleep_time = retry_after if retry_after else calculate_backoff(
-                            attempt + 1,
-                            base_backoff=INITIAL_BACKOFF_SECONDS,
-                            max_backoff=MAX_BACKOFF_SECONDS,
-                        )
-                        logger.info(f"Rate limited (429). Backing off for {sleep_time:.1f}s before retry...")
-                        self.circuit_breaker.record_failure(category.value, status_code=429, is_retry=retry_occurred)
-                        time.sleep(sleep_time)
-                        continue
+                            sleep_time = retry_after if retry_after else calculate_backoff(
+                                attempt + 1,
+                                base_backoff=INITIAL_BACKOFF_SECONDS,
+                                max_backoff=MAX_BACKOFF_SECONDS,
+                            )
+                            logger.info(f"Rate limited (429). Backing off for {sleep_time:.1f}s before retry {attempt+1}...")
+                            time.sleep(sleep_time)
+                            continue
+                        else:
+                            logger.warning(f"HTTP 429 retries exhausted ({self.max_retries}) for '{role}' in '{location}'.")
+                            break
+
+                    # HTTP 5xx: Server error. Bounded retry, separate counting
+                    elif (status_code and status_code >= 500) or category == ErrorCategory.HTTP_SERVER_ERROR:
+                        self.circuit_breaker.record_failure(category.value, status_code=status_code or 500, is_retry=retry_occurred)
+                        if attempt < self.max_retries:
+                            sleep_time = calculate_backoff(
+                                attempt + 1,
+                                base_backoff=15.0,
+                                max_backoff=60.0,
+                            )
+                            logger.info(f"Server error ({status_code or 500}). Backing off for {sleep_time:.1f}s before retry {attempt+1}...")
+                            time.sleep(sleep_time)
+                            continue
+                        else:
+                            logger.warning(f"Server error retries exhausted for '{role}' in '{location}'.")
+                            break
+
+                    # Other errors (network, timeout, etc.)
                     else:
-                        self.circuit_breaker.record_failure(category.value, status_code=429, is_retry=retry_occurred)
-                        break
+                        self.circuit_breaker.record_failure(category.value, status_code=status_code, is_retry=retry_occurred)
+                        if attempt < self.max_retries:
+                            sleep_time = calculate_backoff(
+                                attempt + 1,
+                                base_backoff=INITIAL_BACKOFF_SECONDS,
+                                max_backoff=MAX_BACKOFF_SECONDS,
+                            )
+                            time.sleep(sleep_time)
+                            continue
+                        else:
+                            break
 
                 if not jobs.empty:
                     now_iso = datetime.now(timezone.utc).isoformat()
@@ -325,7 +359,7 @@ class LinkedInCollector:
             except Exception as e:
                 status_code, category, msg = parse_error_details(str(e))
                 final_outcome = "exhausted_retries" if attempt == self.max_retries else "retrying"
-                self.run_errors.append({
+                err_rec = {
                     "run_id": self.run_id,
                     "source": "linkedin",
                     "role": role,
@@ -339,14 +373,75 @@ class LinkedInCollector:
                     "retry_occurred": retry_occurred,
                     "retry_count": attempt,
                     "final_outcome": final_outcome,
-                })
+                }
+                self.run_errors.append(err_rec)
                 logger.error(f"Exception during LinkedIn search for '{role}': {e}")
-                self.circuit_breaker.record_failure(category.value, status_code=status_code, is_retry=retry_occurred)
-                if attempt < self.max_retries:
-                    sleep_time = calculate_backoff(attempt + 1, base_backoff=INITIAL_BACKOFF_SECONDS, max_backoff=MAX_BACKOFF_SECONDS)
-                    time.sleep(sleep_time)
-                else:
+
+                # HTTP 403 Forbidden: Do not hammer
+                if status_code == 403 or category == ErrorCategory.HTTP_403_ACCESS_BLOCKED:
+                    logger.warning("Permanent access block (403). Aborting retries for this query.")
+                    err_rec["final_outcome"] = "fatal_blocked_no_retry"
+                    self.circuit_breaker.record_failure(category.value, status_code=403, is_retry=retry_occurred)
                     break
+
+                # HTTP 406 CAPTCHA: Do not attempt bypass
+                elif status_code == 406 or category == ErrorCategory.HTTP_406_RECAPTCHA_CHALLENGE:
+                    logger.warning("CAPTCHA challenge (406). Pausing respectfully without bypass.")
+                    err_rec["final_outcome"] = "fatal_challenge_no_bypass"
+                    self.circuit_breaker.record_failure(category.value, status_code=406, is_retry=retry_occurred)
+                    break
+
+                # HTTP 429: Rate limited. Apply Retry-After or bounded backoff with jitter
+                elif status_code == 429 or category == ErrorCategory.HTTP_429_RATE_LIMITED:
+                    self.circuit_breaker.record_failure(category.value, status_code=429, is_retry=retry_occurred)
+                    if attempt < self.max_retries:
+                        retry_after = self.pacer.get_retry_after("linkedin.com")
+                        if not retry_after:
+                            retry_match = re.search(r"retry[-_]after[:\s]+(\d+)", msg, re.IGNORECASE)
+                            if retry_match:
+                                retry_after = float(retry_match.group(1))
+
+                        sleep_time = retry_after if retry_after else calculate_backoff(
+                            attempt + 1,
+                            base_backoff=INITIAL_BACKOFF_SECONDS,
+                            max_backoff=MAX_BACKOFF_SECONDS,
+                        )
+                        logger.info(f"Rate limited (429). Backing off for {sleep_time:.1f}s before retry {attempt+1}...")
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        logger.warning(f"HTTP 429 retries exhausted ({self.max_retries}) for '{role}' in '{location}'.")
+                        break
+
+                # HTTP 5xx: Server error. Bounded retry, separate counting
+                elif (status_code and status_code >= 500) or category == ErrorCategory.HTTP_SERVER_ERROR:
+                    self.circuit_breaker.record_failure(category.value, status_code=status_code or 500, is_retry=retry_occurred)
+                    if attempt < self.max_retries:
+                        sleep_time = calculate_backoff(
+                            attempt + 1,
+                            base_backoff=15.0,
+                            max_backoff=60.0,
+                        )
+                        logger.info(f"Server error ({status_code or 500}). Backing off for {sleep_time:.1f}s before retry {attempt+1}...")
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        logger.warning(f"Server error retries exhausted for '{role}' in '{location}'.")
+                        break
+
+                # Other errors (network, timeout, etc.)
+                else:
+                    self.circuit_breaker.record_failure(category.value, status_code=status_code, is_retry=retry_occurred)
+                    if attempt < self.max_retries:
+                        sleep_time = calculate_backoff(
+                            attempt + 1,
+                            base_backoff=INITIAL_BACKOFF_SECONDS,
+                            max_backoff=MAX_BACKOFF_SECONDS,
+                        )
+                        time.sleep(sleep_time)
+                        continue
+                    else:
+                        break
 
         return records
 
@@ -392,13 +487,13 @@ class LinkedInCollector:
             records = self.execute_search_with_backoff(role, loc, is_remote)
             duration = round(time.time() - t0, 2)
 
-            recent_err = [
+            search_errors = [
                 e for e in self.run_errors
-                if e.get("role") == role and e.get("location") == loc and e.get("status_code") in (429, 403, 406)
+                if e.get("role") == role and e.get("location") == loc and e.get("is_remote") == is_remote
             ]
 
             # Critical data integrity: Only mark search completed if clean success
-            if records or not recent_err:
+            if records or not search_errors:
                 self.completed_searches.add((role, loc, is_remote))
                 self.raw_records.extend(records)
                 self.current_run_raw_count += len(records)
@@ -407,8 +502,14 @@ class LinkedInCollector:
                 search_status = "SUCCESS" if records else "EMPTY_SUCCESS"
             else:
                 searches_failed_count += 1
-                is_429 = any(e.get("status_code") == 429 for e in recent_err)
-                search_status = "RATE_LIMITED" if is_429 else "FAILED"
+                is_429 = any(e.get("status_code") == 429 for e in search_errors)
+                is_5xx = any(e.get("status_code") and e.get("status_code") >= 500 for e in search_errors)
+                if is_429:
+                    search_status = "RATE_LIMITED"
+                elif is_5xx:
+                    search_status = "SERVER_ERROR"
+                else:
+                    search_status = "FAILED"
                 logger.warning(f"Search for '{role}' in '{loc}' failed ({search_status}); NOT marked completed in checkpoint.")
 
             self.search_stats.append({
@@ -492,8 +593,8 @@ class LinkedInCollector:
             "searches_completed": searches_completed or len(self.completed_searches),
             "searches_failed": searches_failed,
             "searches_skipped": searches_skipped,
-            "searches_resumed": len(self.completed_searches) if self.resumed_from_checkpoint_count else 0,
-            "raw_records_collected": self.current_run_raw_count or len(self.raw_records),
+            "searches_resumed": len(self.initial_completed_searches) if self.resumed_from_checkpoint_count else 0,
+            "raw_records_collected": self.current_run_raw_count,
             "raw_records_from_checkpoint": self.resumed_from_checkpoint_count,
             "raw_records_total": len(self.raw_records),
             "unique_records_preserved": len(unique_records),

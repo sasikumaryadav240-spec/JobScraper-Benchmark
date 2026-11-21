@@ -104,11 +104,30 @@ class RequestPacer:
         self.default_interval = float(default_interval)
         self.host_intervals: Dict[str, float] = {}
         self._last_request_times: Dict[str, float] = {}
+        self._host_retry_after: Dict[str, float] = {}
         self._lock = threading.RLock()
         self._host_locks: Dict[str, threading.Lock] = {}
         self._time_func: Callable[[], float] = time.time
         self._sleep_func: Callable[[float], None] = time.sleep
         self.history: List[Dict[str, Any]] = []
+
+    def record_retry_after(self, url_or_host: str, seconds: float) -> None:
+        """Record Retry-After duration for a host and adjust its next allowed request timestamp."""
+        with self._lock:
+            host = normalize_host(url_or_host)
+            now = self._time_func()
+            self._last_request_times[host] = max(
+                self._last_request_times.get(host, 0.0),
+                now + float(seconds) - self.get_host_interval(host),
+            )
+            self._host_retry_after[host] = float(seconds)
+            logger.info(f"Recorded Retry-After for '{host}': {seconds:.1f}s. Pacing adjusted.")
+
+    def get_retry_after(self, url_or_host: str) -> Optional[float]:
+        """Get the last recorded Retry-After duration for a host, if any."""
+        with self._lock:
+            host = normalize_host(url_or_host)
+            return self._host_retry_after.get(host)
 
     def _get_host_lock(self, host: str) -> threading.Lock:
         with self._lock:
@@ -149,6 +168,7 @@ class RequestPacer:
         with self._lock:
             self._last_request_times.clear()
             self._host_locks.clear()
+            self._host_retry_after.clear()
             self.history.clear()
 
     def wait_before_request(self, url_or_host: str) -> float:
@@ -325,7 +345,14 @@ def install_request_pacer(pacer: Optional[RequestPacer] = None) -> RequestPacer:
 
         def _paced_requests_request(self_session: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
             active_pacer.wait_before_request(url)
-            return _ORIG_REQUESTS_SESSION_REQUEST(self_session, method, url, *args, **kwargs)
+            resp = _ORIG_REQUESTS_SESSION_REQUEST(self_session, method, url, *args, **kwargs)
+            if hasattr(resp, "status_code") and resp.status_code == 429:
+                ra_hdr = getattr(resp, "headers", {}).get("Retry-After")
+                if ra_hdr:
+                    ra_val = parse_retry_after(ra_hdr)
+                    if ra_val:
+                        active_pacer.record_retry_after(url, ra_val)
+            return resp
 
         requests.sessions.Session.request = _paced_requests_request  # type: ignore[assignment]
 
@@ -336,7 +363,14 @@ def install_request_pacer(pacer: Optional[RequestPacer] = None) -> RequestPacer:
 
             def _paced_curl_request(self_session: Any, method: str, url: str, *args: Any, **kwargs: Any) -> Any:
                 active_pacer.wait_before_request(url)
-                return _ORIG_CURL_SESSION_REQUEST(self_session, method, url, *args, **kwargs)
+                resp = _ORIG_CURL_SESSION_REQUEST(self_session, method, url, *args, **kwargs)
+                if hasattr(resp, "status_code") and resp.status_code == 429:
+                    ra_hdr = getattr(resp, "headers", {}).get("Retry-After")
+                    if ra_hdr:
+                        ra_val = parse_retry_after(ra_hdr)
+                        if ra_val:
+                            active_pacer.record_retry_after(url, ra_val)
+                return resp
 
             curl_cffi.requests.session.Session.request = _paced_curl_request  # type: ignore[assignment]
         except (ImportError, AttributeError) as e:

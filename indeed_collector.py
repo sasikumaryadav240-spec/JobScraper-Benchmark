@@ -495,7 +495,7 @@ class IndeedCollector:
             "searches_skipped": searches_skipped_count,
             "searches_resumed": len(completed_searches),
             "raw_records_returned": raw_count,
-            "raw_records_collected": self.current_run_raw_count or raw_count,
+            "raw_records_collected": self.current_run_raw_count,
             "raw_records_from_checkpoint": len(raw_results) - self.current_run_raw_count,
             "unique_records_after_dedup": total,
             "duplicates_removed": dup_count,
