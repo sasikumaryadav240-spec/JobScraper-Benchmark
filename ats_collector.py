@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 import random
 import time
 from collections import Counter
@@ -59,6 +60,42 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
 
 
+def _write_json_atomic(path: Path, data: Any, indent: int = 2) -> None:
+    """Write JSON data to path atomically using a temporary file and atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + f".tmp_{os.getpid()}_{time.time_ns()}")
+    try:
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=indent, default=str)
+        temp_path.replace(path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
+def _write_csv_atomic(path: Path, rows: list[dict[str, Any]], fieldnames: list[str]) -> None:
+    """Write CSV rows to path atomically using a temporary file and atomic replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + f".tmp_{os.getpid()}_{time.time_ns()}")
+    try:
+        with open(temp_path, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+        temp_path.replace(path)
+    except Exception:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 class ATSCollector:
     def __init__(
         self,
@@ -90,6 +127,7 @@ class ATSCollector:
         }
 
         self.completed_boards: set[tuple[str, str]] = set()  # (platform, board_id)
+        self.initial_completed_boards: set[tuple[str, str]] = set()
         self.raw_records: list[dict[str, Any]] = []
         self.run_errors: list[dict[str, Any]] = []
         self.board_stats: list[dict[str, Any]] = []
@@ -121,6 +159,7 @@ class ATSCollector:
                     except json.JSONDecodeError:
                         continue
             self.resumed_from_checkpoint_count = count
+            self.initial_completed_boards = set(self.completed_boards)
             logger.info(f"Loaded {count} records across {len(self.completed_boards)} boards from checkpoint")
         except Exception as e:
             logger.warning(f"Error reading checkpoint: {e}")
@@ -204,68 +243,87 @@ class ATSCollector:
         boards_failed_count = 0
         boards_skipped_count = 0
 
-        for idx, board in enumerate(target_boards, 1):
-            board_key = (board.ats_platform, board.board_identifier)
-            if board_key in self.completed_boards:
-                logger.info(f"[{idx}/{total}] Skipping already completed board: {board.company_name} ({board.ats_platform})")
-                boards_skipped_count += 1
-                continue
+        # Pre-export any existing checkpoint records so ats_jobs.json is immediately populated
+        if self.raw_records:
+            self.process_and_save(
+                boards_planned=total,
+                boards_completed=len(self.completed_boards),
+                boards_failed=0,
+                boards_skipped=0,
+            )
 
-            if not self.circuit_breaker.can_proceed():
-                logger.warning("ATS circuit breaker is ACTIVE after persistent failures. Halting board processing.")
-                break
+        try:
+            for idx, board in enumerate(target_boards, 1):
+                board_key = (board.ats_platform, board.board_identifier)
+                if board_key in self.completed_boards:
+                    logger.info(f"[{idx}/{total}] Skipping already completed board: {board.company_name} ({board.ats_platform})")
+                    boards_skipped_count += 1
+                    continue
 
-            logger.info(f"[{idx}/{total}] Processing board: {board.company_name} ({board.ats_platform}:{board.board_identifier})...")
+                if not self.circuit_breaker.can_proceed():
+                    logger.warning("ATS circuit breaker is ACTIVE after persistent failures. Halting board processing.")
+                    break
 
-            if idx > 1:
-                delay = random.uniform(*DELAY_BETWEEN_BOARDS_SECONDS)
-                time.sleep(delay)
+                logger.info(f"[{idx}/{total}] Processing board: {board.company_name} ({board.ats_platform}:{board.board_identifier})...")
 
-            t0 = time.time()
-            raw_listings = self.fetch_board_with_backoff(board)
-            duration = round(time.time() - t0, 2)
+                if idx > 1:
+                    delay = random.uniform(*DELAY_BETWEEN_BOARDS_SECONDS)
+                    time.sleep(delay)
 
-            recent_board_err = [
-                e for e in self.run_errors
-                if e.get("board_identifier") == board.board_identifier and e.get("final_outcome") in ("fatal_non_retryable", "exhausted_retries")
-            ]
+                t0 = time.time()
+                raw_listings = self.fetch_board_with_backoff(board)
+                duration = round(time.time() - t0, 2)
 
-            if raw_listings or not recent_board_err:
-                board_records_for_chk = []
-                for item in raw_listings:
-                    item_copy = dict(item) if isinstance(item, dict) else {"raw": item}
-                    item_copy["ats_platform"] = board.ats_platform
-                    item_copy["board_identifier"] = board.board_identifier
-                    item_copy["company_name"] = board.company_name
-                    board_records_for_chk.append(item_copy)
+                recent_board_err = [
+                    e for e in self.run_errors
+                    if e.get("board_identifier") == board.board_identifier and e.get("final_outcome") in ("fatal_non_retryable", "exhausted_retries")
+                ]
 
-                self.completed_boards.add(board_key)
-                self.raw_records.extend(board_records_for_chk)
-                self.current_run_raw_count += len(board_records_for_chk)
-                self.append_checkpoint(board_records_for_chk)
-                boards_completed_count += 1
-                b_status = "SUCCESS" if raw_listings else "EMPTY_SUCCESS"
-            else:
-                boards_failed_count += 1
-                b_status = "FAILED"
-                logger.warning(f"Board {board.company_name} failed; NOT marked completed.")
+                if raw_listings or not recent_board_err:
+                    board_records_for_chk = []
+                    for item in raw_listings:
+                        item_copy = dict(item) if isinstance(item, dict) else {"raw": item}
+                        item_copy["ats_platform"] = board.ats_platform
+                        item_copy["board_identifier"] = board.board_identifier
+                        item_copy["company_name"] = board.company_name
+                        board_records_for_chk.append(item_copy)
 
-            self.board_stats.append({
-                "company_name": board.company_name,
-                "platform": board.ats_platform,
-                "board_identifier": board.board_identifier,
-                "total_listings_fetched": len(raw_listings),
-                "duration_seconds": duration,
-                "status": b_status,
-            })
+                    self.completed_boards.add(board_key)
+                    self.raw_records.extend(board_records_for_chk)
+                    self.current_run_raw_count += len(board_records_for_chk)
+                    self.append_checkpoint(board_records_for_chk)
+                    boards_completed_count += 1
+                    b_status = "SUCCESS" if raw_listings else "EMPTY_SUCCESS"
 
-        logger.info("Raw ATS collection phase finished. Parsing and deduplicating cybersecurity roles...")
-        return self.process_and_save(
-            boards_planned=total,
-            boards_completed=boards_completed_count,
-            boards_failed=boards_failed_count,
-            boards_skipped=boards_skipped_count,
-        )
+                    # Incrementally update all ATS export files atomically
+                    self.process_and_save(
+                        boards_planned=total,
+                        boards_completed=len(self.completed_boards),
+                        boards_failed=boards_failed_count,
+                        boards_skipped=boards_skipped_count,
+                    )
+                else:
+                    boards_failed_count += 1
+                    b_status = "FAILED"
+                    logger.warning(f"Board {board.company_name} failed; NOT marked completed.")
+
+                self.board_stats.append({
+                    "company_name": board.company_name,
+                    "platform": board.ats_platform,
+                    "board_identifier": board.board_identifier,
+                    "total_listings_fetched": len(raw_listings),
+                    "duration_seconds": duration,
+                    "status": b_status,
+                })
+
+            logger.info("Raw ATS collection phase finished. Parsing and deduplicating cybersecurity roles...")
+        finally:
+            return self.process_and_save(
+                boards_planned=total,
+                boards_completed=len(self.completed_boards),
+                boards_failed=boards_failed_count,
+                boards_skipped=boards_skipped_count,
+            )
 
     def process_and_save(
         self,
@@ -309,22 +367,16 @@ class ATSCollector:
         unique_jobs, dedup_audit = deduplicate_ats_records(canonical_jobs)
 
         # Write unified ATS Jobs JSON
-        with open(self.jobs_json_path, "w", encoding="utf-8") as f:
-            json.dump([r.model_dump(mode="json") for r in unique_jobs], f, indent=2, default=str)
+        _write_json_atomic(self.jobs_json_path, [r.model_dump(mode="json") for r in unique_jobs])
 
         # Write per-platform JSON files
         gh_jobs = [r for r in unique_jobs if r.source == "greenhouse"]
         lever_jobs = [r for r in unique_jobs if r.source == "lever"]
         ashby_jobs = [r for r in unique_jobs if r.source == "ashby"]
 
-        with open(self.greenhouse_json_path, "w", encoding="utf-8") as f:
-            json.dump([r.model_dump(mode="json") for r in gh_jobs], f, indent=2, default=str)
-
-        with open(self.lever_json_path, "w", encoding="utf-8") as f:
-            json.dump([r.model_dump(mode="json") for r in lever_jobs], f, indent=2, default=str)
-
-        with open(self.ashby_json_path, "w", encoding="utf-8") as f:
-            json.dump([r.model_dump(mode="json") for r in ashby_jobs], f, indent=2, default=str)
+        _write_json_atomic(self.greenhouse_json_path, [r.model_dump(mode="json") for r in gh_jobs])
+        _write_json_atomic(self.lever_json_path, [r.model_dump(mode="json") for r in lever_jobs])
+        _write_json_atomic(self.ashby_json_path, [r.model_dump(mode="json") for r in ashby_jobs])
 
         # Write unified ATS Jobs CSV
         if unique_jobs:
@@ -338,19 +390,14 @@ class ATSCollector:
                 d["matched_search_types"] = json.dumps(d.get("matched_search_types", []))
                 d["matched_run_ids"] = json.dumps(d.get("matched_run_ids", []))
             keys = list(dict_rows[0].keys())
-            with open(self.jobs_csv_path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=keys)
-                writer.writeheader()
-                writer.writerows(dict_rows)
+            _write_csv_atomic(self.jobs_csv_path, dict_rows, keys)
 
         # Write Errors JSON
-        with open(self.errors_path, "w", encoding="utf-8") as f:
-            json.dump(self.run_errors, f, indent=2)
+        _write_json_atomic(self.errors_path, self.run_errors)
 
         # Generate Quality Report
         quality_report = self.generate_quality_report(unique_jobs, dedup_audit, gh_jobs, lever_jobs, ashby_jobs)
-        with open(self.quality_path, "w", encoding="utf-8") as f:
-            json.dump(quality_report, f, indent=2)
+        _write_json_atomic(self.quality_path, quality_report)
 
         # Generate Run Summary
         run_summary = {
@@ -361,8 +408,8 @@ class ATSCollector:
             "boards_completed": boards_completed or len(self.completed_boards),
             "boards_failed": boards_failed,
             "boards_skipped": boards_skipped,
-            "boards_resumed": len(self.completed_boards) if self.resumed_from_checkpoint_count else 0,
-            "raw_listings_fetched_current_run": self.current_run_raw_count or len(self.raw_records),
+            "boards_resumed": len(self.initial_completed_boards) if self.resumed_from_checkpoint_count else 0,
+            "raw_listings_fetched_current_run": self.current_run_raw_count,
             "raw_listings_from_checkpoint": self.resumed_from_checkpoint_count,
             "raw_listings_fetched_total": len(self.raw_records),
             "cybersecurity_jobs_filtered": len(canonical_jobs),
@@ -387,8 +434,7 @@ class ATSCollector:
                 "quality_report": str(self.quality_path),
             },
         }
-        with open(self.summary_path, "w", encoding="utf-8") as f:
-            json.dump(run_summary, f, indent=2)
+        _write_json_atomic(self.summary_path, run_summary)
 
         logger.info(
             f"Phase 4 processing finished: {len(self.raw_records)} raw listings -> {len(canonical_jobs)} cybersecurity jobs -> {len(unique_jobs)} unique jobs."

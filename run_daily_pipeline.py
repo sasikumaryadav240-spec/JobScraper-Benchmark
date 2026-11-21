@@ -370,7 +370,17 @@ class DailyPipelineOrchestrator:
         cb_stats: dict[str, Any] = {}
 
         try:
-            collector = ATSCollector()
+            collector = ATSCollector(
+                checkpoint_path=self.base_dir / "ats_checkpoint.jsonl",
+                jobs_json_path=self.base_dir / "ats_jobs.json",
+                jobs_csv_path=self.base_dir / "ats_jobs.csv",
+                greenhouse_json_path=self.base_dir / "greenhouse_jobs.json",
+                lever_json_path=self.base_dir / "lever_jobs.json",
+                ashby_json_path=self.base_dir / "ashby_jobs.json",
+                errors_path=self.base_dir / "ats_errors.json",
+                quality_path=self.base_dir / "ats_quality_report.json",
+                summary_path=self.base_dir / "ats_run_summary.json",
+            )
             res = collector.run()
             rec_count = len(res)
             raw_count = len(getattr(collector, "raw_records", []))
@@ -393,7 +403,7 @@ class DailyPipelineOrchestrator:
 
             col_errors = getattr(collector, "run_errors", [])
             has_errors = bool(col_errors)
-            if failed > 0:
+            if failed > 0 or (planned > 0 and (completed + skipped) < planned) or cb_stats.get("is_open"):
                 if rec_count > 0:
                     status = "PARTIAL"
                     err_msg = f"{completed}/{planned} employer boards completed, {failed} failed"
@@ -411,6 +421,33 @@ class DailyPipelineOrchestrator:
             logger.error(f"ATS stage encountered an error: {e}", exc_info=True)
             self.run_errors.append({"source": source_name, "error": err_msg, "timestamp": datetime.now(timezone.utc).isoformat()})
             status = "FAILED"
+
+            # Check if partial data was saved incrementally before the failure
+            ats_jobs_f = self.base_dir / "ats_jobs.json"
+            if ats_jobs_f.exists():
+                try:
+                    with open(ats_jobs_f, "r", encoding="utf-8") as f:
+                        saved_jobs = json.load(f)
+                        if saved_jobs and isinstance(saved_jobs, list):
+                            rec_count = len(saved_jobs)
+                            collected_in_run = True
+                            status = "PARTIAL"
+                            err_msg = f"ATS stage interrupted ({e}), preserved {rec_count} partial records"
+                except Exception:
+                    pass
+
+            summary_file = self.base_dir / "ats_run_summary.json"
+            if summary_file.exists():
+                try:
+                    with open(summary_file, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                        planned = sdata.get("boards_planned", planned)
+                        completed = sdata.get("boards_completed", completed)
+                        failed = sdata.get("boards_failed", failed)
+                        skipped = sdata.get("boards_skipped", skipped)
+                        cb_stats = sdata.get("circuit_breaker_stats", cb_stats)
+                except Exception:
+                    pass
 
         duration = round(time.time() - t0, 2)
         freshness, timestamp = self._check_source_freshness(self.base_dir / "ats_jobs.json", collected_in_run)
@@ -438,13 +475,28 @@ class DailyPipelineOrchestrator:
         logger.info(f"Starting Daily Job Collection Pipeline [Run ID: {self.run_id}, Mode: {self.run_mode}]")
 
         if self.run_mode != "skip_scraping":
-            self.run_indeed()
+            try:
+                self.run_indeed()
+            except Exception as e:
+                logger.error(f"Unexpected error in run_indeed: {e}", exc_info=True)
             time.sleep(3.0)
-            self.run_naukri()
+
+            try:
+                self.run_naukri()
+            except Exception as e:
+                logger.error(f"Unexpected error in run_naukri: {e}", exc_info=True)
             time.sleep(3.0)
-            self.run_linkedin()
+
+            try:
+                self.run_linkedin()
+            except Exception as e:
+                logger.error(f"Unexpected error in run_linkedin: {e}", exc_info=True)
             time.sleep(3.0)
-            self.run_ats()
+
+            try:
+                self.run_ats()
+            except Exception as e:
+                logger.error(f"Unexpected error in run_ats: {e}", exc_info=True)
         else:
             logger.info("Scraping skipped by user flag. Processing existing source files directly.")
             for src in ("indeed", "naukri", "linkedin", "ats"):
